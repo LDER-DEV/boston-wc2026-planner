@@ -1,0 +1,28 @@
+# Marimo cache
+__marimo__/
+.marimo/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# Editor / IDE
+.claude/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Notebook scratch
+.ipynb_checkpoints/
