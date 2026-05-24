@@ -1,0 +1,1113 @@
+/* ======================================================================
+ * WC 2026 — soccerball loader, custom cursor, FIFA-26 particles, and
+ * the right-rail itinerary planner.
+ * ====================================================================== */
+
+/* ---------------------------------------------------------------------
+ *  CUSTOM SOCCER-BALL CURSOR + PARTICLE TRAIL
+ * --------------------------------------------------------------------- */
+html.wc-custom-cursor,
+html.wc-custom-cursor body {
+  cursor: none !important;
+}
+
+html.wc-custom-cursor input,
+html.wc-custom-cursor textarea,
+html.wc-custom-cursor select,
+html.wc-custom-cursor [contenteditable="true"],
+html.wc-custom-cursor .cm-content,
+html.wc-custom-cursor .cm-editor {
+  cursor: text !important;
+}
+
+html.wc-custom-cursor a,
+html.wc-custom-cursor button,
+html.wc-custom-cursor [role="button"],
+html.wc-custom-cursor label,
+html.wc-custom-cursor summary,
+html.wc-custom-cursor [type="button"],
+html.wc-custom-cursor [type="submit"] {
+  cursor: pointer !important;
+}
+
+html.wc-custom-cursor .leaflet-container,
+html.wc-custom-cursor .leaflet-grab {
+  cursor: grab !important;
+}
+
+html.wc-custom-cursor .leaflet-dragging .leaflet-grab {
+  cursor: grabbing !important;
+}
+
+/* Inside the itinerary panel and the floating "open" pill, restore the
+   regular system cursor (the spinning soccer-ball is hidden over the
+   panel, so without this rule the user would have no cursor at all). */
+html.wc-custom-cursor #wc-itinerary-panel,
+html.wc-custom-cursor #wc-itinerary-panel *,
+html.wc-custom-cursor #wc-iti-open,
+html.wc-custom-cursor #wc-iti-toast {
+  cursor: auto !important;
+}
+html.wc-custom-cursor #wc-itinerary-panel input,
+html.wc-custom-cursor #wc-itinerary-panel textarea,
+html.wc-custom-cursor #wc-itinerary-panel [contenteditable="true"] {
+  cursor: text !important;
+}
+html.wc-custom-cursor #wc-itinerary-panel button,
+html.wc-custom-cursor #wc-itinerary-panel select,
+html.wc-custom-cursor #wc-itinerary-panel [role="button"],
+html.wc-custom-cursor #wc-itinerary-panel .wc-iti-chip,
+html.wc-custom-cursor #wc-itinerary-panel .wc-iti-suggest-item,
+html.wc-custom-cursor #wc-iti-open {
+  cursor: pointer !important;
+}
+html.wc-custom-cursor #wc-itinerary-panel .wc-iti-item,
+html.wc-custom-cursor #wc-itinerary-panel .wc-iti-grip {
+  cursor: grab !important;
+}
+html.wc-custom-cursor #wc-itinerary-panel .wc-iti-item.dragging,
+html.wc-custom-cursor #wc-itinerary-panel .wc-iti-grip:active {
+  cursor: grabbing !important;
+}
+html.wc-custom-cursor #wc-itinerary-panel .wc-iti-resize,
+html.wc-custom-cursor #wc-itinerary-panel .wc-iti-resize::before,
+html.wc-custom-cursor.wc-itinerary-resizing,
+html.wc-custom-cursor.wc-itinerary-resizing body {
+  cursor: ew-resize !important;
+}
+
+#wc-cursor-ball {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 30px;
+  height: 30px;
+  margin: 0;
+  padding: 0;
+  display: none;
+  pointer-events: none;
+  z-index: 2147483646;
+  object-fit: contain;
+  transform-origin: 50% 50%;
+  animation: wcCursorSpin 1.5s linear infinite;
+  will-change: left, top, transform;
+  filter: drop-shadow(0 1px 2px rgba(15, 23, 42, 0.25));
+}
+
+.wc-cursor-particle {
+  position: fixed;
+  width: var(--wc-particle-size, 4px);
+  height: var(--wc-particle-size, 4px);
+  margin: 0;
+  pointer-events: none;
+  z-index: 2147483645;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  --wc-particle-color: #0033a0;
+  background: radial-gradient(
+    circle at 38% 32%,
+    color-mix(in srgb, var(--wc-particle-color) 35%, white) 0%,
+    var(--wc-particle-color) 55%,
+    color-mix(in srgb, var(--wc-particle-color) 70%, black) 100%
+  );
+  box-shadow:
+    0 0 6px color-mix(in srgb, var(--wc-particle-color) 70%, transparent),
+    0 0 12px color-mix(in srgb, var(--wc-particle-color) 35%, transparent);
+  opacity: 0;
+  animation: wcParticleFade 1.45s ease-out forwards;
+}
+
+@keyframes wcParticleFade {
+  0% {
+    opacity: 0.95;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  35% { opacity: 0.8; }
+  100% {
+    opacity: 0;
+    transform: translate(
+        calc(-50% + var(--wc-particle-drift-x, 0px)),
+        calc(-50% + var(--wc-particle-drift-y, 0px))
+      )
+      scale(0.4);
+  }
+}
+
+@keyframes wcCursorSpin {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to   { transform: translate(-50%, -50%) rotate(360deg); }
+}
+
+@keyframes wcSpin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* ---------------------------------------------------------------------
+ *  IN-CELL LOADERS
+ * --------------------------------------------------------------------- */
+.wc-loader-track {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-family: system-ui, sans-serif;
+  font-size: 0.92rem;
+  color: #475569;
+}
+.wc-loader-spin-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+}
+.wc-loader-ball,
+img.wc-loader-ball {
+  display: block;
+  animation: wcSpin 0.8s linear infinite;
+  transform-origin: 50% 50%;
+}
+
+svg.running-app-icon {
+  display: none !important;
+  visibility: hidden !important;
+  animation: none !important;
+}
+
+[data-testid="loading-indicator"] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  min-height: 36px;
+}
+[data-testid="loading-indicator"]::before {
+  content: "";
+  display: block;
+  width: 32px;
+  height: 32px;
+  visibility: visible;
+  background: url("/public/soccerball.png") center / contain no-repeat;
+  animation: wcSpin 0.8s linear infinite;
+  transform-origin: 50% 50%;
+}
+
+marimo-progress svg.lucide-loader-circle,
+[data-component="marimo-progress"] svg.lucide-loader-circle {
+  display: none !important;
+}
+marimo-progress .flex.items-center:has(svg.lucide-loader-circle)::before,
+[data-component="marimo-progress"] .flex.items-center:has(svg.lucide-loader-circle)::before {
+  content: "";
+  display: inline-block;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  margin-right: 4px;
+  background: url("/public/soccerball.png") center / contain no-repeat;
+  animation: wcSpin 0.8s linear infinite;
+  transform-origin: 50% 50%;
+}
+
+/* ---------------------------------------------------------------------
+ *  ITINERARY — LAYOUT SHIFT
+ *  At desktop sizes we (a) reserve a fixed gutter on the right of body
+ *  for the panel, and (b) force Marimo's centered medium-width column
+ *  to align LEFT instead of centering, so the page sits clearly on the
+ *  left side of the screen and does not collide with the panel.
+ * --------------------------------------------------------------------- */
+:root {
+  --wc-iti-width: 340px;
+  --wc-iti-gutter: 14px;
+  --wc-iti-edge: 16px;
+  --wc-content-left: 18px;
+}
+
+@media (min-width: 1180px) {
+  html.wc-itinerary-active body {
+    padding-right: calc(
+      var(--wc-iti-width) + var(--wc-iti-gutter) + var(--wc-iti-edge)
+    );
+    box-sizing: border-box;
+  }
+  html.wc-itinerary-active.wc-itinerary-collapsed body {
+    padding-right: 0;
+  }
+
+  /* Marimo's content column is wrapped with the Tailwind class
+     `max-w-(--content-width-medium)` (also `max-w-(--content-width)`).
+     Center alignment is via `mx-auto`. We override the horizontal
+     margins so the column hugs the left side of its parent. */
+  html.wc-itinerary-active.wc-itinerary-shift-content
+    .max-w-\(--content-width-medium\),
+  html.wc-itinerary-active.wc-itinerary-shift-content
+    .max-w-\(--content-width\) {
+    margin-left: var(--wc-content-left) !important;
+    margin-right: auto !important;
+  }
+
+  /* If marimo has any fixed top-right chrome (download, fullscreen,
+     etc.), nudge it left of the panel so it isn't hidden beneath. */
+  html.wc-itinerary-active marimo-app-header,
+  html.wc-itinerary-active [data-marimo-app-header],
+  html.wc-itinerary-active .marimo-app-header,
+  html.wc-itinerary-active [data-testid="kiosk-controls"] {
+    right: calc(var(--wc-iti-width) + var(--wc-iti-gutter) + var(--wc-iti-edge)) !important;
+  }
+}
+
+/* ---------------------------------------------------------------------
+ *  ITINERARY PANEL — FRAME
+ * --------------------------------------------------------------------- */
+#wc-itinerary-panel {
+  position: fixed;
+  top: var(--wc-iti-edge);
+  right: var(--wc-iti-edge);
+  bottom: var(--wc-iti-edge);
+  width: var(--wc-iti-width);
+  min-width: 280px;
+  max-width: calc(100vw - 36px);
+  z-index: 2147483600;
+  background: #ffffff;
+  border-radius: 18px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  box-shadow:
+    0 22px 56px rgba(15, 23, 42, 0.18),
+    0 4px 14px rgba(15, 23, 42, 0.08);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #0f172a;
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1),
+              opacity 0.2s ease;
+}
+html.wc-itinerary-resizing #wc-itinerary-panel {
+  /* Suppress the slide transition while the user is dragging the
+     resize handle so width changes feel direct. */
+  transition: none !important;
+  user-select: none;
+}
+html.wc-itinerary-resizing,
+html.wc-itinerary-resizing body {
+  cursor: ew-resize !important;
+  user-select: none !important;
+}
+
+/* Resize handle — sits flush with the panel's left edge. */
+.wc-iti-resize {
+  position: absolute;
+  top: 0;
+  left: -2px;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+  z-index: 2;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.wc-iti-resize::before {
+  content: "";
+  width: 3px;
+  height: 38px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.12);
+  transition: background 0.15s ease, height 0.15s ease;
+}
+.wc-iti-resize:hover::before,
+html.wc-itinerary-resizing .wc-iti-resize::before {
+  background: linear-gradient(180deg, #0033a0 0%, #00b5e2 100%);
+  height: 56px;
+}
+.wc-iti-resize-tip {
+  position: absolute;
+  top: 50%;
+  right: calc(100% + 6px);
+  transform: translateY(-50%);
+  font-family: system-ui, sans-serif;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: #fff;
+  background: #0f172a;
+  padding: 3px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+html.wc-itinerary-resizing .wc-iti-resize-tip {
+  opacity: 1;
+}
+html.wc-itinerary-collapsed #wc-itinerary-panel {
+  transform: translateX(calc(100% + 28px));
+  opacity: 0;
+  pointer-events: none;
+}
+
+@media (max-width: 1179px) {
+  #wc-itinerary-panel {
+    transform: translateX(calc(100% + 28px));
+    opacity: 0;
+    pointer-events: none;
+  }
+  html.wc-itinerary-open #wc-itinerary-panel {
+    transform: none;
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+/* Floating "open" pill, visible when panel is collapsed/closed. */
+#wc-iti-open {
+  position: fixed;
+  right: 18px;
+  bottom: 20px;
+  z-index: 2147483599;
+  background: linear-gradient(135deg, #0033a0 0%, #00b5e2 100%);
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  padding: 11px 18px;
+  font-weight: 700;
+  font-size: 0.88rem;
+  letter-spacing: 0.3px;
+  box-shadow: 0 12px 26px rgba(0, 51, 160, 0.35);
+  cursor: pointer;
+  display: none;
+  align-items: center;
+  gap: 7px;
+  font-family: system-ui, sans-serif;
+}
+#wc-iti-open:hover { transform: translateY(-1px); }
+html.wc-itinerary-collapsed #wc-iti-open { display: inline-flex; }
+@media (max-width: 1179px) {
+  #wc-iti-open { display: inline-flex; }
+  html.wc-itinerary-open #wc-iti-open { display: none; }
+}
+
+/* ---------------------------------------------------------------------
+ *  PANEL — HEADER
+ * --------------------------------------------------------------------- */
+.wc-iti-header {
+  background: linear-gradient(135deg, #0033a0 0%, #5b2c83 55%, #e4002b 100%);
+  color: #fff;
+  padding: 18px 18px 16px 18px;
+  flex-shrink: 0;
+}
+.wc-iti-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.wc-iti-emoji { font-size: 1.6rem; line-height: 1; }
+.wc-iti-title-stack { flex: 1; min-width: 0; }
+.wc-iti-title {
+  font-weight: 800;
+  font-size: 1.05rem;
+  letter-spacing: -0.2px;
+  line-height: 1.15;
+}
+.wc-iti-sub {
+  font-size: 0.74rem;
+  opacity: 0.85;
+  margin-top: 4px;
+  letter-spacing: 0.2px;
+}
+.wc-iti-collapse {
+  background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #fff;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s ease, background 0.2s ease;
+  flex-shrink: 0;
+}
+.wc-iti-collapse:hover { background: rgba(255, 255, 255, 0.3); }
+html.wc-itinerary-collapsed .wc-iti-collapse { transform: rotate(180deg); }
+
+.wc-iti-scope-row {
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.wc-iti-scope-label {
+  font-size: 0.66rem;
+  opacity: 0.78;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+  font-weight: 700;
+}
+.wc-iti-scope-input {
+  flex: 1;
+  min-width: 0;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 8px;
+  padding: 7px 11px;
+  font-size: 0.82rem;
+  color: #0f172a;
+  font-family: inherit;
+}
+.wc-iti-scope-input:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.6);
+}
+
+/* ---------------------------------------------------------------------
+ *  PANEL — QUICK ADD
+ * --------------------------------------------------------------------- */
+.wc-iti-quick-add {
+  padding: 16px 18px 14px 18px;
+  border-bottom: 1px dashed rgba(15, 23, 42, 0.1);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.wc-iti-quick-row {
+  display: flex;
+  gap: 8px;
+}
+.wc-iti-type-sel,
+.wc-iti-title-inp {
+  font-family: inherit;
+  font-size: 0.86rem;
+  border: 1px solid rgba(15, 23, 42, 0.18);
+  border-radius: 9px;
+  padding: 9px 11px;
+  background: #fff;
+  color: #0f172a;
+}
+.wc-iti-type-sel { flex: 1; min-width: 0; }
+.wc-iti-title-inp { width: 100%; }
+.wc-iti-type-sel:focus,
+.wc-iti-title-inp:focus {
+  outline: none;
+  border-color: #0033a0;
+  box-shadow: 0 0 0 3px rgba(0, 51, 160, 0.14);
+}
+.wc-iti-add-btn {
+  background: #0033a0;
+  color: #fff;
+  border: none;
+  border-radius: 9px;
+  padding: 8px 16px;
+  font-weight: 700;
+  font-size: 0.86rem;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.wc-iti-add-btn:hover { background: #00237a; }
+.wc-iti-add-btn:active { transform: translateY(1px); }
+.wc-iti-helper-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* ---------------------------------------------------------------------
+ *  AUTOCOMPLETE DROPDOWN — under the quick-add title input
+ * --------------------------------------------------------------------- */
+.wc-iti-search-wrap {
+  position: relative;
+}
+.wc-iti-suggest {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  background: #fff;
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  border-radius: 10px;
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.14);
+  max-height: 280px;
+  overflow-y: auto;
+  z-index: 30;
+  display: none;
+}
+.wc-iti-suggest.visible { display: block; }
+.wc-iti-suggest-empty,
+.wc-iti-suggest-loading {
+  padding: 10px 12px;
+  font-size: 0.78rem;
+  color: #94a3b8;
+  font-style: italic;
+}
+.wc-iti-suggest-loading::before {
+  content: "";
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  vertical-align: -2px;
+  border: 2px solid #cbd5e1;
+  border-top-color: #0033a0;
+  border-radius: 50%;
+  animation: wcSpin 0.7s linear infinite;
+}
+.wc-iti-suggest-item {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  gap: 8px;
+  align-items: start;
+  padding: 8px 11px;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.05);
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.wc-iti-suggest-item:last-child { border-bottom: none; }
+.wc-iti-suggest-item:hover,
+.wc-iti-suggest-item.active {
+  background: rgba(0, 51, 160, 0.06);
+}
+.wc-iti-suggest-icon {
+  font-size: 1rem;
+  line-height: 1.2;
+  padding-top: 1px;
+}
+.wc-iti-suggest-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.wc-iti-suggest-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #0f172a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wc-iti-suggest-sub {
+  font-size: 0.72rem;
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 1px;
+}
+.wc-iti-suggest-foot {
+  padding: 6px 11px;
+  font-size: 0.66rem;
+  color: #94a3b8;
+  text-align: right;
+  background: #f8fafc;
+  border-top: 1px solid rgba(15, 23, 42, 0.05);
+  letter-spacing: 0.4px;
+}
+
+/* ---------------------------------------------------------------------
+ *  IN-PANEL ROUTE MAP — numbered markers + colored connecting lines
+ * --------------------------------------------------------------------- */
+.wc-iti-map-section {
+  border-bottom: 1px dashed rgba(15, 23, 42, 0.1);
+  padding: 12px 18px 14px 18px;
+  flex-shrink: 0;
+  background: #fbfcfe;
+}
+.wc-iti-map-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.wc-iti-map-label {
+  font-size: 0.66rem;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: #64748b;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.wc-iti-map-pill {
+  font-size: 0.62rem;
+  letter-spacing: 0.4px;
+  background: #0033a0;
+  color: #fff;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.wc-iti-map-toggle {
+  font-family: inherit;
+  background: #fff;
+  color: #0033a0;
+  border: 1px solid rgba(0, 51, 160, 0.35);
+  border-radius: 999px;
+  padding: 4px 11px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.wc-iti-map-toggle:hover {
+  background: #0033a0;
+  color: #fff;
+}
+.wc-iti-map {
+  width: 100%;
+  height: 200px;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #e2e8f0;
+  position: relative;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+}
+.wc-iti-map.collapsed { display: none; }
+.wc-iti-map-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 14px;
+  font-size: 0.78rem;
+  color: #64748b;
+  font-style: italic;
+  background: linear-gradient(135deg,
+    rgba(0, 51, 160, 0.04), rgba(0, 181, 226, 0.04));
+}
+.wc-iti-map .leaflet-tile-pane { filter: saturate(1.05); }
+.wc-iti-map .leaflet-control-attribution {
+  font-size: 9px !important;
+  background: rgba(255, 255, 255, 0.85) !important;
+}
+.wc-iti-mapmarker {
+  background: transparent !important;
+  border: none !important;
+}
+.wc-iti-mapnum {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 800;
+  font-size: 0.86rem;
+  font-family: system-ui, sans-serif;
+  box-shadow:
+    0 0 0 3px #fff,
+    0 0 0 4px rgba(15, 23, 42, 0.18),
+    0 6px 12px rgba(15, 23, 42, 0.28);
+  transform-origin: 50% 50%;
+}
+.wc-iti-mapnum.start { box-shadow: 0 0 0 3px #fff, 0 0 0 5px #0033a0, 0 6px 12px rgba(0,51,160,0.4); }
+.wc-iti-mapnum.end   { box-shadow: 0 0 0 3px #fff, 0 0 0 5px #00A651, 0 6px 12px rgba(0,166,81,0.4); }
+.wc-iti-map-orphans {
+  margin-top: 8px;
+  font-size: 0.7rem;
+  color: #94a3b8;
+  text-align: center;
+  font-style: italic;
+}
+.wc-iti-helper-btn {
+  font-family: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: #f1f5f9;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  color: #334155;
+  padding: 5px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.wc-iti-helper-btn:hover {
+  background: #0033a0;
+  color: #fff;
+  border-color: #0033a0;
+}
+
+/* ---------------------------------------------------------------------
+ *  PANEL — PRESETS (grouped chips)
+ * --------------------------------------------------------------------- */
+.wc-iti-presets {
+  padding: 14px 18px 10px 18px;
+  border-bottom: 1px dashed rgba(15, 23, 42, 0.1);
+  flex-shrink: 0;
+  max-height: 170px;
+  overflow-y: auto;
+}
+.wc-iti-presets::-webkit-scrollbar { width: 6px; }
+.wc-iti-presets::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.16);
+  border-radius: 3px;
+}
+.wc-iti-section-label {
+  font-size: 0.66rem;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: #64748b;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.wc-iti-list-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.wc-iti-count {
+  font-size: 0.72rem;
+  letter-spacing: 0.4px;
+  color: #94a3b8;
+  text-transform: none;
+  font-weight: 600;
+}
+.wc-iti-preset-group {
+  margin-bottom: 10px;
+}
+.wc-iti-group-label {
+  font-size: 0.66rem;
+  font-weight: 700;
+  color: var(--group-color, #475569);
+  letter-spacing: 0.6px;
+  margin-bottom: 5px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.wc-iti-preset-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.wc-iti-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: color-mix(in srgb, var(--chip-color, #0033a0) 9%, white);
+  color: color-mix(in srgb, var(--chip-color, #0033a0) 75%, black);
+  border: 1px solid color-mix(in srgb, var(--chip-color, #0033a0) 30%, white);
+  border-radius: 999px;
+  padding: 5px 11px 5px 8px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: transform 0.1s ease, background 0.15s ease;
+  white-space: nowrap;
+}
+.wc-iti-chip:hover {
+  background: color-mix(in srgb, var(--chip-color, #0033a0) 18%, white);
+  transform: translateY(-1px);
+}
+.wc-iti-chip:active { transform: translateY(0); }
+.wc-iti-chip-icon { font-size: 0.95rem; line-height: 1; }
+
+/* ---------------------------------------------------------------------
+ *  PANEL — LIST
+ * --------------------------------------------------------------------- */
+.wc-iti-list-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 18px 16px 18px;
+  position: relative;
+}
+.wc-iti-list-wrap.drop-target-active {
+  background: linear-gradient(180deg,
+    rgba(0, 181, 226, 0.08) 0%,
+    rgba(0, 51, 160, 0.05) 100%);
+}
+.wc-iti-list-wrap::-webkit-scrollbar { width: 8px; }
+.wc-iti-list-wrap::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.18);
+  border-radius: 4px;
+}
+
+.wc-iti-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.wc-iti-empty {
+  font-size: 0.82rem;
+  color: #94a3b8;
+  font-style: italic;
+  padding: 18px 14px;
+  border: 1px dashed rgba(15, 23, 42, 0.18);
+  border-radius: 12px;
+  text-align: center;
+  line-height: 1.55;
+}
+.wc-iti-empty b { color: #475569; font-style: normal; }
+
+.wc-iti-item {
+  display: grid;
+  grid-template-columns: 18px 26px 1fr 26px;
+  align-items: start;
+  gap: 10px;
+  background: #fff;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-left: 4px solid var(--item-color, #0033a0);
+  border-radius: 12px;
+  padding: 11px 11px 11px 9px;
+  cursor: grab;
+  transition: box-shadow 0.15s ease, transform 0.1s ease,
+              border-color 0.15s ease, background 0.15s ease;
+  position: relative;
+}
+.wc-iti-item:hover {
+  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.08);
+  border-color: rgba(15, 23, 42, 0.16);
+}
+.wc-iti-item.dragging {
+  opacity: 0.55;
+  cursor: grabbing;
+}
+.wc-iti-item.drop-above {
+  box-shadow: 0 -3px 0 0 #0033a0 inset, 0 4px 12px rgba(0, 51, 160, 0.12);
+}
+.wc-iti-item.drop-below {
+  box-shadow: 0 3px 0 0 #0033a0 inset, 0 4px 12px rgba(0, 51, 160, 0.12);
+}
+
+.wc-iti-grip {
+  color: #94a3b8;
+  font-size: 0.95rem;
+  user-select: none;
+  cursor: grab;
+  padding-top: 4px;
+  letter-spacing: -2px;
+  text-align: center;
+}
+.wc-iti-step {
+  font-weight: 800;
+  font-size: 0.78rem;
+  color: var(--item-color, #0033a0);
+  background: color-mix(in srgb, var(--item-color, #0033a0) 12%, white);
+  border-radius: 50%;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.wc-iti-item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.wc-iti-item-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.wc-iti-icon { font-size: 1.05rem; line-height: 1; flex-shrink: 0; }
+.wc-iti-item-title,
+.wc-iti-item-sub,
+.wc-iti-item-time {
+  font-family: inherit;
+  border: none;
+  background: transparent;
+  padding: 2px 4px;
+  margin: 0;
+  color: #0f172a;
+  width: 100%;
+  border-radius: 5px;
+}
+.wc-iti-item-title {
+  font-weight: 700;
+  font-size: 0.92rem;
+  line-height: 1.3;
+  flex: 1;
+  min-width: 0;
+}
+.wc-iti-item-sub {
+  font-size: 0.76rem;
+  color: #64748b;
+  line-height: 1.4;
+}
+.wc-iti-item-time {
+  font-size: 0.75rem;
+  color: var(--item-color, #0033a0);
+  font-weight: 600;
+}
+.wc-iti-item-title:focus,
+.wc-iti-item-sub:focus,
+.wc-iti-item-time:focus {
+  outline: none;
+  background: rgba(0, 51, 160, 0.06);
+}
+.wc-iti-item-title:hover,
+.wc-iti-item-sub:hover,
+.wc-iti-item-time:hover {
+  background: rgba(15, 23, 42, 0.03);
+}
+
+.wc-iti-del {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 0.95rem;
+  cursor: pointer;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  line-height: 1;
+  padding: 0;
+  align-self: start;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.wc-iti-del:hover {
+  color: #fff;
+  background: #dc2626;
+}
+
+/* ---------------------------------------------------------------------
+ *  PANEL — FOOTER
+ * --------------------------------------------------------------------- */
+.wc-iti-footer {
+  flex-shrink: 0;
+  padding: 12px 18px;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+  background: #f8fafc;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.wc-iti-foot-btn {
+  background: #fff;
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  color: #475569;
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 7px 13px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease,
+              border-color 0.15s ease;
+}
+.wc-iti-foot-btn:hover {
+  background: #0033a0;
+  color: #fff;
+  border-color: #0033a0;
+}
+.wc-iti-foot-btn.wc-iti-clear:hover {
+  background: #dc2626;
+  border-color: #dc2626;
+}
+.wc-iti-foot-flash {
+  margin-left: auto;
+  font-size: 0.74rem;
+  color: #16a34a;
+  font-weight: 700;
+  animation: wcFlashFade 1.7s ease forwards;
+}
+@keyframes wcFlashFade {
+  0% { opacity: 0; transform: translateY(4px); }
+  10%, 75% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-4px); }
+}
+
+/* ---------------------------------------------------------------------
+ *  LEAFLET POPUP — "+ Add to plan" button injection
+ * --------------------------------------------------------------------- */
+.wc-iti-popup-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  background: linear-gradient(135deg, #0033a0 0%, #00b5e2 100%);
+  color: #fff !important;
+  border: none;
+  font-family: system-ui, sans-serif;
+  font-weight: 700;
+  font-size: 0.78rem;
+  padding: 5px 11px;
+  border-radius: 999px;
+  cursor: pointer;
+  text-decoration: none !important;
+  box-shadow: 0 3px 8px rgba(0, 51, 160, 0.25);
+  transition: transform 0.1s ease, box-shadow 0.15s ease;
+}
+.wc-iti-popup-add:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 5px 12px rgba(0, 51, 160, 0.35);
+}
+.wc-iti-popup-add.added {
+  background: #16a34a;
+  box-shadow: 0 3px 8px rgba(22, 163, 74, 0.25);
+}
+
+/* ---------------------------------------------------------------------
+ *  TOAST — confirmation when item added
+ * --------------------------------------------------------------------- */
+#wc-iti-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  z-index: 2147483640;
+  background: #0f172a;
+  color: #fff;
+  padding: 10px 18px;
+  border-radius: 999px;
+  font-family: system-ui, sans-serif;
+  font-size: 0.86rem;
+  font-weight: 600;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.3);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+#wc-iti-toast.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+#wc-iti-toast .wc-iti-toast-icon {
+  display: inline-block;
+  margin-right: 6px;
+}
+
+/* ---------------------------------------------------------------------
+ *  PRINT — show plan, hide everything else
+ * --------------------------------------------------------------------- */
+@media print {
+  #wc-iti-open,
+  .wc-iti-collapse,
+  .wc-iti-quick-add,
+  .wc-iti-presets,
+  .wc-iti-footer,
+  .wc-iti-del,
+  .wc-iti-grip,
+  #wc-iti-toast {
+    display: none !important;
+  }
+  #wc-itinerary-panel {
+    position: static !important;
+    width: 100% !important;
+    box-shadow: none !important;
+    border: none !important;
+  }
+  body { padding-right: 0 !important; }
+}

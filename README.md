@@ -32,6 +32,10 @@ After a single match pick and an optional starting address, the notebook auto-ge
 
 No paid API keys required. All data sources are free and public.
 
+## Loading icon
+
+The spinning loader and custom mouse cursor use `public/soccerball.png` (transparent PNG). Marimo only serves static files from the `public/` folder at `/public/...` — do not put the image in the project root. Replace that file to change the icon site-wide. The cursor includes a light particle trail (`wc-head.html` + `wc-theme.css`); respects `prefers-reduced-motion`.
+
 ## Quick start
 
 ### Prerequisites
