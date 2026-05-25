@@ -374,6 +374,72 @@
   }
   window.wcAddToItinerary = publicAdd;
 
+  /* =================================================================
+   *  Public API — programmatic plan management
+   *  Used by submission.py cells to seed the right-rail plan from the
+   *  already-computed personalized itinerary (and from the default
+   *  match-summary cell when no starting point was provided).
+   * ================================================================= */
+  function publicSetScope(name) {
+    setScope(String(name || "default"));
+    var sel = document.querySelector(".wc-iti-scope-input");
+    if (sel) sel.value = getScope();
+    rerender();
+  }
+  window.wcSetPlanScope = publicSetScope;
+
+  function publicSeedIfEmpty(scope, items) {
+    if (typeof scope === "string" && scope) publicSetScope(scope);
+    scope = getScope();
+    var all = loadAll();
+    if (Array.isArray(all[scope]) && all[scope].length) {
+      rerender();
+      return false;
+    }
+    if (!Array.isArray(items) || !items.length) {
+      rerender();
+      return false;
+    }
+    var built = items.map(function (s) {
+      var t = typeMeta(s.type || inferType(String(s.title || "")));
+      var lat = (typeof s.lat === "number") ? s.lat : null;
+      var lon = (typeof s.lon === "number") ? s.lon
+              : (typeof s.lng === "number") ? s.lng : null;
+      if ((lat === null || lon === null) && KNOWN_COORDS[s.title]) {
+        lat = KNOWN_COORDS[s.title][0];
+        lon = KNOWN_COORDS[s.title][1];
+      }
+      return {
+        id: uid(),
+        type: t.id,
+        title: String(s.title || "").slice(0, 140),
+        subtitle: String(s.subtitle || "").slice(0, 220),
+        time: String(s.time || "").slice(0, 30),
+        color: t.color,
+        lat: lat,
+        lon: lon,
+      };
+    });
+    all[scope] = built;
+    saveAll(all);
+    rerender();
+    var html = document.documentElement;
+    html.classList.remove("wc-itinerary-collapsed");
+    html.classList.add("wc-itinerary-open");
+    return true;
+  }
+  window.wcSeedPlanIfEmpty = publicSeedIfEmpty;
+
+  function publicClearPlan(scope) {
+    if (typeof scope === "string" && scope) publicSetScope(scope);
+    scope = getScope();
+    var all = loadAll();
+    all[scope] = [];
+    saveAll(all);
+    rerender();
+  }
+  window.wcClearPlan = publicClearPlan;
+
   function initItinerary() {
     if (document.getElementById("wc-itinerary-panel")) return;
 
@@ -1467,15 +1533,245 @@
   }
 
   /* =================================================================
+   *  Plan-seed marker observer
+   *  Watches the DOM for <div class="wc-plan-seed" data-scope data-tier
+   *  data-stops> markers emitted by submission.py cells. Multiple
+   *  markers may appear (the personalized itinerary cell + the
+   *  default match-summary cell both render); we pick the highest
+   *  tier and apply via wcSeedPlanIfEmpty so user edits are preserved.
+   * ================================================================= */
+  function initPlanSeeder() {
+    var TIER_RANK = { personalized: 2, default: 1 };
+    var pendingBest = null;
+    var processedSigs = {};
+    var debounceTimer = null;
+
+    function processNow() {
+      if (!pendingBest) return;
+      var p = pendingBest;
+      pendingBest = null;
+      processedSigs[p.sigKey] = true;
+      try { window.wcSeedPlanIfEmpty(p.scope, p.items); }
+      catch (_) {}
+    }
+
+    function consider(marker) {
+      if (!marker || marker.__wcSeedSeen) return;
+      marker.__wcSeedSeen = true;
+      var scope = (marker.getAttribute("data-scope") || "default").trim()
+                  || "default";
+      var tier = (marker.getAttribute("data-tier") || "default").trim();
+      var stops;
+      try { stops = JSON.parse(marker.getAttribute("data-stops") || "[]"); }
+      catch (_) { return; }
+      var sigKey = scope + "::" + tier;
+      if (processedSigs[sigKey]) return;
+      var rank = TIER_RANK[tier] || 0;
+      if (!pendingBest || rank > (TIER_RANK[pendingBest.tier] || 0)) {
+        pendingBest = {
+          tier: tier, scope: scope, items: stops, sigKey: sigKey,
+        };
+      }
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(processNow, 150);
+    }
+
+    function scan() {
+      var nodes = document.querySelectorAll(".wc-plan-seed");
+      Array.prototype.forEach.call(nodes, consider);
+    }
+
+    scan();
+    new MutationObserver(function (muts) {
+      var dirty = false;
+      muts.forEach(function (m) {
+        Array.prototype.forEach.call(m.addedNodes || [], function (n) {
+          if (!n || n.nodeType !== 1) return;
+          if (n.classList && n.classList.contains("wc-plan-seed")) {
+            dirty = true;
+          } else if (n.querySelector &&
+                     n.querySelector(".wc-plan-seed")) {
+            dirty = true;
+          }
+        });
+      });
+      if (dirty) scan();
+    }).observe(document.body, { childList: true, subtree: true });
+  }
+
+  /* =================================================================
+   *  Photon autocomplete on the page's starting-location input
+   *  Finds the Marimo <input> by placeholder ("park plaza" /
+   *  "starting") and attaches a suggestion dropdown. Selecting a
+   *  suggestion writes the full address into the input and fires
+   *  input + change events so Marimo picks up the value and the
+   *  Python-side Nominatim geocode resolves cleanly.
+   * ================================================================= */
+  function fetchPhotonSuggest(q) {
+    var url =
+      "https://photon.komoot.io/api/?q=" + encodeURIComponent(q) +
+      "&limit=6&lang=en&lat=42.32&lon=-71.10&location_bias_scale=0.5";
+    return fetch(url, { headers: { "Accept": "application/json" } })
+      .then(function (r) { return r.ok ? r.json() : { features: [] }; })
+      .then(function (j) {
+        return (j.features || []).map(function (f) {
+          var p = f.properties || {};
+          var name = p.name || p.street || "Unnamed location";
+          var sub = [
+            p.street && p.housenumber
+              ? p.housenumber + " " + p.street : p.street,
+            p.district || p.suburb,
+            p.city || p.town || p.village,
+            p.state, p.country,
+          ].filter(Boolean).join(", ");
+          return { title: name, subtitle: sub };
+        });
+      })
+      .catch(function () { return []; });
+  }
+
+  function initStartLocationAutocomplete() {
+    var attached = new WeakSet();
+
+    function attachTo(inp) {
+      if (attached.has(inp)) return;
+      attached.add(inp);
+      inp.setAttribute("autocomplete", "off");
+      inp.setAttribute("spellcheck", "false");
+
+      var box = el("div", { class: "wc-start-suggest" });
+      document.body.appendChild(box);
+
+      var data = [];
+      var active = -1;
+      var pending = null;
+
+      function position() {
+        var r = inp.getBoundingClientRect();
+        box.style.left  = (r.left + window.scrollX) + "px";
+        box.style.top   = (r.bottom + window.scrollY + 4) + "px";
+        box.style.width = r.width + "px";
+      }
+      function clear() {
+        box.classList.remove("visible");
+        box.innerHTML = "";
+        data = []; active = -1;
+      }
+      function pick(idx) {
+        var s = data[idx];
+        if (!s) return;
+        var full = s.subtitle ? (s.title + ", " + s.subtitle) : s.title;
+        inp.value = full;
+        inp.dispatchEvent(new Event("input",  { bubbles: true }));
+        inp.dispatchEvent(new Event("change", { bubbles: true }));
+        clear();
+        inp.focus();
+      }
+      function highlight(idx) {
+        var rows = box.querySelectorAll(".wc-start-suggest-item");
+        Array.prototype.forEach.call(rows, function (r, i) {
+          r.classList.toggle("active", i === idx);
+        });
+        active = idx;
+      }
+      function render(list) {
+        box.innerHTML = "";
+        data = list;
+        if (!list.length) {
+          box.appendChild(el("div",
+            { class: "wc-start-suggest-empty" },
+            "No matches. Press Enter to use the text you typed."));
+          box.classList.add("visible");
+          return;
+        }
+        list.forEach(function (s, i) {
+          box.appendChild(el("div", {
+            class: "wc-start-suggest-item",
+            role: "option",
+            onclick: function () { pick(i); },
+            onmouseenter: function () { highlight(i); },
+          }, [
+            el("div", { class: "wc-start-suggest-title" }, s.title),
+            el("div", { class: "wc-start-suggest-sub" }, s.subtitle || ""),
+          ]));
+        });
+        box.appendChild(el("div", { class: "wc-start-suggest-foot" },
+          "Powered by OpenStreetMap (Photon)"));
+        box.classList.add("visible");
+      }
+
+      inp.addEventListener("input", function () {
+        if (pending) clearTimeout(pending);
+        var q = inp.value.trim();
+        if (q.length < 2) { clear(); return; }
+        position();
+        box.innerHTML = "";
+        box.appendChild(el("div", { class: "wc-start-suggest-loading" },
+          "Searching addresses…"));
+        box.classList.add("visible");
+        pending = setTimeout(function () {
+          fetchPhotonSuggest(q).then(function (list) {
+            if (inp.value.trim() !== q) return;
+            position();
+            render(list);
+          });
+        }, 280);
+      });
+      inp.addEventListener("focus", function () {
+        if (data.length) { position(); box.classList.add("visible"); }
+      });
+      inp.addEventListener("keydown", function (e) {
+        if (e.key === "ArrowDown" && data.length) {
+          highlight((active + 1) % data.length); e.preventDefault();
+        } else if (e.key === "ArrowUp" && data.length) {
+          highlight((active - 1 + data.length) % data.length);
+          e.preventDefault();
+        } else if (e.key === "Enter") {
+          if (active >= 0) { pick(active); e.preventDefault(); }
+        } else if (e.key === "Escape") {
+          clear();
+        }
+      });
+      inp.addEventListener("blur", function () {
+        /* Delay so clicks on suggestion rows still register. */
+        setTimeout(clear, 200);
+      });
+      document.addEventListener("click", function (e) {
+        if (e.target !== inp && !box.contains(e.target)) clear();
+      });
+      window.addEventListener("scroll", position, { passive: true });
+      window.addEventListener("resize", position);
+    }
+
+    function scan() {
+      var inputs = document.querySelectorAll(
+        "input[type=text], input:not([type])"
+      );
+      Array.prototype.forEach.call(inputs, function (inp) {
+        var ph = (inp.placeholder || "").toLowerCase();
+        if (ph.indexOf("park plaza") >= 0 ||
+            ph.indexOf("starting") >= 0) {
+          attachTo(inp);
+        }
+      });
+    }
+
+    scan();
+    new MutationObserver(scan).observe(document.body, {
+      childList: true, subtree: true,
+    });
+  }
+
+  /* =================================================================
    *  Boot
    * ================================================================= */
   function boot() {
-    var reduced = false;
-    try { reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches; }
-    catch (_) {}
-    if (!reduced) { try { initCursor(); } catch (_) {} }
+    /* Soccer-ball cursor + particle trail disabled — standard cursor only.
+       (Kept initCursor defined above in case we want to re-enable later.) */
     try { loadLeaflet(); } catch (_) {}
     try { initItinerary(); } catch (_) {}
+    try { initPlanSeeder(); } catch (_) {}
+    try { initStartLocationAutocomplete(); } catch (_) {}
     try { watchDocForPopups(document, window); } catch (_) {}
     try { startIframeWatcher(); } catch (_) {}
   }

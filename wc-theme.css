@@ -1111,3 +1111,58 @@ html.wc-itinerary-collapsed .wc-iti-collapse { transform: rotate(180deg); }
   }
   body { padding-right: 0 !important; }
 }
+
+/* ======================================================================
+ *  Photon autocomplete on the starting-location input
+ * ====================================================================== */
+.wc-start-suggest {
+  position: absolute;
+  z-index: 2147483630;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.18);
+  max-height: 320px;
+  overflow-y: auto;
+  display: none;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.wc-start-suggest.visible { display: block; }
+
+.wc-start-suggest-item {
+  padding: 9px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid #f1f5f9;
+}
+.wc-start-suggest-item:last-of-type { border-bottom: 0; }
+.wc-start-suggest-item:hover,
+.wc-start-suggest-item.active {
+  background: #eff6ff;
+}
+.wc-start-suggest-title {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: #0f172a;
+  line-height: 1.25;
+}
+.wc-start-suggest-sub {
+  font-size: 0.78rem;
+  color: #64748b;
+  margin-top: 2px;
+  line-height: 1.35;
+}
+.wc-start-suggest-loading,
+.wc-start-suggest-empty {
+  padding: 10px 12px;
+  font-size: 0.85rem;
+  color: #64748b;
+}
+.wc-start-suggest-foot {
+  padding: 6px 12px;
+  font-size: 0.68rem;
+  color: #94a3b8;
+  border-top: 1px solid #f1f5f9;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  text-align: right;
+}
