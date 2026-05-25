@@ -20,7 +20,12 @@ Run in EDIT MODE (see and modify code):
 import marimo
 
 __generated_with = "0.23.6"
-app = marimo.App(width="medium", app_title="WC 2026 Boston Crash Safety Guide")
+app = marimo.App(
+    width="medium",
+    app_title="WC 2026 Boston Crash Safety Guide",
+    css_file="wc-theme.css",
+    html_head_file="wc-head.html",
+)
 
 
 @app.cell(hide_code=True)
@@ -32,6 +37,53 @@ def _():
     from folium.plugins import HeatMap, MarkerCluster
     import altair as alt
     return HeatMap, MarkerCluster, alt, folium, mo, pd, requests
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    import base64
+    import marimo._runtime.output._output as output
+    from contextlib import contextmanager
+    from pathlib import Path
+
+    _WC_BALL_DIR = Path(__file__).resolve().parent
+    _WC_BALL_IMAGE = _WC_BALL_DIR / "public" / "soccerball.png"
+
+    def _wc_soccer_ball_img(size: int = 32, css_class: str = "wc-loader-ball") -> str:
+        """Spinning loader uses soccerball.png (transparent) from the project folder."""
+        if not _WC_BALL_IMAGE.exists():
+            return (
+                f'<span class="{css_class}" style="display:inline-block;width:{size}px;'
+                f'height:{size}px;line-height:{size}px;font-size:10px;text-align:center;'
+                'color:#64748b;" title="Add public/soccerball.png to project folder">⚽?</span>'
+            )
+        _b64 = base64.b64encode(_WC_BALL_IMAGE.read_bytes()).decode("ascii")
+        _src = f"data:image/png;base64,{_b64}"
+        return (
+            f'<img src="{_src}" class="{css_class}" width="{size}" height="{size}" '
+            'style="display:block;transform-origin:50% 50%;" '
+            'alt="" role="presentation" decoding="async"/>'
+        )
+
+    _WC_LOADER_BALL = _wc_soccer_ball_img(32, "wc-loader-ball")
+
+    def _wc_loader_html(message: str) -> str:
+        return (
+            f'<div class="wc-loader-track" role="status" aria-live="polite">'
+            f'<span class="wc-loader-spin-wrap">{_WC_LOADER_BALL}</span>'
+            f"<span>{message}</span></div>"
+        )
+
+    @contextmanager
+    def wc_spinner(message: str):
+        loader = mo.Html(_wc_loader_html(message))
+        output.append(loader)
+        try:
+            yield
+        finally:
+            output.remove(loader)
+
+    return _WC_LOADER_BALL, wc_spinner
 
 
 @app.cell(hide_code=True)
@@ -1253,7 +1305,7 @@ def _(mo, selected_match, starting_point):
 
 
 @app.cell(hide_code=True)
-def _(mo, requests, selected_match):
+def _(mo, requests, selected_match, wc_spinner):
     mo.stop(
         selected_match is None,
         mo.callout(
@@ -1369,7 +1421,7 @@ def _(mo, requests, selected_match):
         except Exception:
             return None
 
-    with mo.status.spinner("Fetching match-day weather…"):
+    with wc_spinner("Fetching match-day weather…"):
         weather = _fetch_weather(selected_match["date"])
 
     # Match-day departure math: Foxboro CR ~55 min ride; +1 hr stadium
@@ -1630,7 +1682,7 @@ def _(mo, selected_match, starting_point):
 
 
 @app.cell(hide_code=True)
-def _(city, mo, pd, requests, selected_match, severity, year):
+def _(city, mo, pd, requests, selected_match, severity, wc_spinner, year):
     mo.stop(selected_match is None)
 
     def _layer_name(yr: str) -> str:
@@ -1685,7 +1737,7 @@ def _(city, mo, pd, requests, selected_match, severity, year):
 
     used_year = year.value
     fallback_note = None
-    with mo.status.spinner(
+    with wc_spinner(
         f"Querying MassDOT for {city.value} {year.value}…"
     ):
         df = _fetch(year.value)
@@ -1824,7 +1876,7 @@ def _(mo, selected_match):
 
 
 @app.cell(hide_code=True)
-def _(folium, mo, requests, selected_match):
+def _(folium, mo, requests, selected_match, _WC_LOADER_BALL):
     mo.stop(selected_match is None)
     import os as _os
     import json as _json
@@ -2150,13 +2202,40 @@ def _(folium, mo, requests, selected_match):
     """
     transit_map.get_root().html.add_child(folium.Element(_legend_html))
 
-    _status_overlay = """
+    _status_overlay = f"""
+    <style>
+      @keyframes wcSpinMap {{
+        from {{ transform: rotate(0deg); }}
+        to   {{ transform: rotate(360deg); }}
+      }}
+      #mbta-live-status .wc-loader-spin-wrap {{
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        margin-right: 6px;
+        vertical-align: middle;
+      }}
+      #mbta-live-status .wc-loader-ball {{
+        display: block;
+        animation: wcSpinMap 0.8s linear infinite;
+        transform-origin: 50% 50%;
+      }}
+      #mbta-live-status .wc-loader-track {{
+        display: inline-flex;
+        align-items: center;
+      }}
+    </style>
     <div id="mbta-live-status"
          style="position:absolute; top:12px; left:60px; z-index:9999;
                 background:white; padding:8px 14px; border-radius:8px;
                 box-shadow:0 4px 12px rgba(0,0,0,0.15); font-family:sans-serif;
                 font-size:0.92rem; color:#475569;">
-      ⏳ Loading live MBTA vehicles…
+      <span class="wc-loader-track" role="status" aria-live="polite">
+        <span class="wc-loader-spin-wrap">{_WC_LOADER_BALL}</span>
+        <span>Loading live MBTA vehicles…</span>
+      </span>
     </div>
     """
     transit_map.get_root().html.add_child(folium.Element(_status_overlay))
@@ -2478,7 +2557,7 @@ def _(mo, selected_match):
 
 
 @app.cell(hide_code=True)
-def _(folium, home_country, mo, poi_area, poi_categories, requests, selected_match, starting_point):
+def _(folium, home_country, mo, poi_area, poi_categories, requests, selected_match, starting_point, wc_spinner):
     mo.stop(selected_match is None)
     mo.stop(
         not poi_categories.value,
@@ -2639,7 +2718,7 @@ def _(folium, home_country, mo, poi_area, poi_categories, requests, selected_mat
         "out center;\n"
     )
 
-    with mo.status.spinner(
+    with wc_spinner(
         f"Querying OpenStreetMap for {poi_area.value.lower()}…"
     ):
         try:

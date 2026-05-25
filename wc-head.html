@@ -1,0 +1,1489 @@
+<script>
+/* =====================================================================
+ * WC 2026 — custom cursor + interactive itinerary planner side panel
+ *
+ *  - FIFA 26 cursor particle trail (skipped if reduced-motion)
+ *  - Right-rail itinerary panel with:
+ *      • drag-and-drop reordering
+ *      • localStorage persistence (per-plan-name scoping)
+ *      • grouped quick-add chips for the actual data on the page
+ *      • global window.wcAddToItinerary(item) hook
+ *      • automatic "+ Add to plan" button injection on every Leaflet
+ *        popup (main doc and same-origin folium iframes)
+ *      • drop target — drag selected text from the page into the
+ *        panel to add it as a stop
+ *      • toast confirmations
+ * ===================================================================== */
+(function () {
+  /* =================================================================
+   *  Shared FIFA WC 26 brand palette
+   * ================================================================= */
+  var WC26_COLORS = [
+    "#E4002B", "#6B1D3A", "#FF6900", "#C4D600",
+    "#00A651", "#004B49", "#0033A0", "#00B5E2",
+    "#B19CD9", "#5B2C83", "#C5A572",
+  ];
+
+  /* =================================================================
+   *  CURSOR PARTICLES
+   * ================================================================= */
+  function initCursor() {
+    document.documentElement.classList.add("wc-custom-cursor");
+
+    var ball = document.createElement("img");
+    ball.id = "wc-cursor-ball";
+    ball.src = "/public/soccerball.png";
+    ball.alt = "";
+    ball.draggable = false;
+    ball.setAttribute("aria-hidden", "true");
+    document.body.appendChild(ball);
+
+    var visible = false;
+    var lastParticle = 0;
+    var particles = [];
+    var PARTICLE_MS = 18;
+    var BURST = 2;
+    var MAX_PARTICLES = 80;
+
+    function spawnOne(px, py) {
+      var p = document.createElement("div");
+      p.className = "wc-cursor-particle";
+      var jx = (Math.random() - 0.5) * 14;
+      var jy = (Math.random() - 0.5) * 14;
+      var color = WC26_COLORS[(Math.random() * WC26_COLORS.length) | 0];
+      var size = 3.5 + Math.random() * 3.5;
+      var driftX = (Math.random() - 0.5) * 22;
+      var driftY = 8 + Math.random() * 22;
+      p.style.left = px + jx + "px";
+      p.style.top = py + jy + "px";
+      p.style.setProperty("--wc-particle-color", color);
+      p.style.setProperty("--wc-particle-size", size + "px");
+      p.style.setProperty("--wc-particle-drift-x", driftX + "px");
+      p.style.setProperty("--wc-particle-drift-y", driftY + "px");
+      p.style.animationDelay = Math.random() * 0.08 + "s";
+      document.body.appendChild(p);
+      particles.push(p);
+      setTimeout(function () {
+        p.remove();
+        particles = particles.filter(function (el) { return el !== p; });
+      }, 1500);
+    }
+    function spawnParticle(px, py) {
+      var now = performance.now();
+      if (now - lastParticle < PARTICLE_MS) return;
+      lastParticle = now;
+      for (var i = 0; i < BURST; i++) spawnOne(px, py);
+      while (particles.length > MAX_PARTICLES) {
+        var old = particles.shift();
+        if (old) old.remove();
+      }
+    }
+
+    document.addEventListener("mousemove", function (e) {
+      ball.style.left = e.clientX + "px";
+      ball.style.top = e.clientY + "px";
+      var overMap = e.target.closest(".leaflet-container");
+      var overNative = e.target.closest(
+        "input, textarea, select, .cm-content"
+      ) !== null;
+      var overPanel = e.target.closest("#wc-itinerary-panel") !== null;
+      ball.style.opacity = overMap || overNative || overPanel ? "0" : "1";
+      if (!visible) { ball.style.display = "block"; visible = true; }
+      if (!overMap && !overNative && !overPanel) {
+        spawnParticle(e.clientX, e.clientY);
+      }
+    }, { passive: true });
+
+    document.documentElement.addEventListener("mouseleave", function () {
+      ball.style.display = "none"; visible = false;
+    });
+    document.documentElement.addEventListener("mouseenter", function () {
+      if (visible) ball.style.display = "block";
+    });
+  }
+
+  /* =================================================================
+   *  Leaflet loader (used by the in-panel "plan map")
+   * ================================================================= */
+  var leafletReady = false;
+  var leafletWaiters = [];
+  function loadLeaflet() {
+    if (window.L) { leafletReady = true; return; }
+    var existing = document.querySelector("link[data-wc-leaflet]");
+    if (!existing) {
+      var css = document.createElement("link");
+      css.rel = "stylesheet";
+      css.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+      css.setAttribute("data-wc-leaflet", "1");
+      document.head.appendChild(css);
+    }
+    if (!document.querySelector("script[data-wc-leaflet]")) {
+      var s = document.createElement("script");
+      s.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+      s.async = true;
+      s.setAttribute("data-wc-leaflet", "1");
+      s.onload = function () {
+        leafletReady = true;
+        leafletWaiters.forEach(function (cb) {
+          try { cb(); } catch (_) {}
+        });
+        leafletWaiters = [];
+      };
+      document.head.appendChild(s);
+    }
+  }
+  function whenLeaflet(cb) {
+    if (window.L) { cb(); return; }
+    leafletWaiters.push(cb);
+  }
+
+  /* =================================================================
+   *  ITINERARY — types & presets
+   * ================================================================= */
+  var TYPES = [
+    { id: "start",      label: "Start",      icon: "📍", color: "#0033A0" },
+    { id: "transport",  label: "Transport",  icon: "🚆", color: "#00B5E2" },
+    { id: "food",       label: "Food",       icon: "🍽️", color: "#E4002B" },
+    { id: "bar",        label: "Bar / Pub",  icon: "🍻", color: "#5B2C83" },
+    { id: "stadium",    label: "Stadium",    icon: "🏟️", color: "#00A651" },
+    { id: "hotel",      label: "Hotel",      icon: "🏨", color: "#FF6900" },
+    { id: "attraction", label: "Sightsee",   icon: "⭐", color: "#C5A572" },
+    { id: "note",       label: "Note",       icon: "📝", color: "#475569" },
+  ];
+
+  /* Lat/Lng for the well-known Boston-area chips so they appear on the
+     plan map immediately. Anything not listed here will still be added
+     to the plan, just without coordinates (until autocomplete/popup
+     supplies them). */
+  var KNOWN_COORDS = {
+    "Gillette Stadium":            [42.0908, -71.2643],
+    "South Station":               [42.3519, -71.0552],
+    "Back Bay Station":            [42.3473, -71.0758],
+    "Logan Airport (BOS)":         [42.3656, -71.0096],
+    "Boston Common":               [42.3551, -71.0656],
+    "Fenway Park":                 [42.3467, -71.0972],
+    "Harvard Square":              [42.3736, -71.1190],
+    "Freedom Trail":               [42.3550, -71.0625],
+    "Faneuil Hall / Quincy Market":[42.3601, -71.0547],
+    "Charles River Esplanade":     [42.3534, -71.0760],
+  };
+  function typeMeta(id) {
+    for (var i = 0; i < TYPES.length; i++)
+      if (TYPES[i].id === id) return TYPES[i];
+    return TYPES[TYPES.length - 1];
+  }
+
+  /* Grouped presets — mirrors the data the notebook actually displays. */
+  var PRESET_GROUPS = [
+    {
+      groupLabel: "Start & venues",
+      groupColor: "#0033A0",
+      items: [
+        { type: "stadium",    title: "Gillette Stadium",
+          subtitle: "Foxborough, MA · Match venue" },
+        { type: "start",      title: "South Station",
+          subtitle: "Boston · Foxboro / Franklin Line origin" },
+        { type: "start",      title: "Back Bay Station",
+          subtitle: "Boston · Orange Line + Commuter Rail" },
+        { type: "start",      title: "Logan Airport (BOS)",
+          subtitle: "East Boston · arrival" },
+      ],
+    },
+    {
+      groupLabel: "Transport",
+      groupColor: "#00B5E2",
+      items: [
+        { type: "transport", title: "MBTA Foxboro Line",
+          subtitle: "South Station ⇄ Foxboro (match-day rail)" },
+        { type: "transport", title: "MBTA Franklin Line",
+          subtitle: "Forge Park / 495 ⇄ South Station" },
+        { type: "transport", title: "MBTA Subway",
+          subtitle: "Red, Orange, Green, Blue lines" },
+        { type: "transport", title: "Walk",
+          subtitle: "On-foot leg" },
+        { type: "transport", title: "Rideshare",
+          subtitle: "Uber, Lyft" },
+        { type: "transport", title: "Drive",
+          subtitle: "Personal car / rental" },
+      ],
+    },
+    {
+      groupLabel: "Food, drink & stays",
+      groupColor: "#E4002B",
+      items: [
+        { type: "food",      title: "Pre-match meal",
+          subtitle: "Pick a restaurant from the cuisine map" },
+        { type: "food",      title: "Cafe / Coffee stop",
+          subtitle: "" },
+        { type: "bar",       title: "Post-match pub",
+          subtitle: "From bars overlay" },
+        { type: "hotel",     title: "Hotel check-in",
+          subtitle: "" },
+        { type: "hotel",     title: "Budget stay",
+          subtitle: "Hostel / motel from POI map" },
+      ],
+    },
+    {
+      groupLabel: "Sightsee in Boston",
+      groupColor: "#C5A572",
+      items: [
+        { type: "attraction", title: "Boston Common",
+          subtitle: "Downtown · free" },
+        { type: "attraction", title: "Fenway Park",
+          subtitle: "Kenmore Square" },
+        { type: "attraction", title: "Harvard Square",
+          subtitle: "Cambridge" },
+        { type: "attraction", title: "Freedom Trail",
+          subtitle: "Self-guided · 2.5 mi" },
+        { type: "attraction", title: "Faneuil Hall / Quincy Market",
+          subtitle: "Downtown" },
+        { type: "attraction", title: "Charles River Esplanade",
+          subtitle: "Back Bay waterfront" },
+      ],
+    },
+  ];
+
+  /* Heuristic — map a free-text title to a likely category. Used by the
+     popup-add button and the page drop target. */
+  function inferType(text) {
+    var t = (text || "").toLowerCase();
+    if (/(stadium|gillette)/.test(t))                    return "stadium";
+    if (/(hotel|motel|hostel|inn|guest[\s-]?house)/.test(t)) return "hotel";
+    if (/(restaurant|cafe|coffee|bistro|pizzeria|grill|kitchen|bbq|food|sushi|ramen|taco|burger|deli|bakery)/.test(t))
+      return "food";
+    if (/(pub|bar|tavern|brewery|brewpub|lounge|pubs?)/.test(t))
+      return "bar";
+    if (/(station|stop|line|airport|train|t\b|mbta|red\b|orange\b|blue\b|green\b)/.test(t))
+      return "transport";
+    if (/(park|museum|hall|square|trail|monument|garden|library|attraction)/.test(t))
+      return "attraction";
+    return "note";
+  }
+
+  /* =================================================================
+   *  Storage
+   * ================================================================= */
+  var STORAGE_KEY = "wc26-itinerary-v1";
+  var SCOPE_KEY = "wc26-itinerary-scope";
+
+  function loadAll() {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}") || {}; }
+    catch (_) { return {}; }
+  }
+  function saveAll(all) {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(all)); }
+    catch (_) {}
+  }
+  function getScope() { return localStorage.getItem(SCOPE_KEY) || "default"; }
+  function setScope(name) { localStorage.setItem(SCOPE_KEY, name); }
+  function uid() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  }
+
+  /* =================================================================
+   *  DOM helper
+   * ================================================================= */
+  function el(tag, attrs, children) {
+    var node = document.createElement(tag);
+    if (attrs) {
+      for (var k in attrs) {
+        if (k === "style" && typeof attrs[k] === "object") {
+          for (var s in attrs[k]) node.style.setProperty(s, attrs[k][s]);
+        } else if (k === "class") { node.className = attrs[k]; }
+        else if (k === "html") { node.innerHTML = attrs[k]; }
+        else if (k.indexOf("on") === 0 && typeof attrs[k] === "function") {
+          node.addEventListener(k.slice(2).toLowerCase(), attrs[k]);
+        } else if (k === "draggable") { node.draggable = !!attrs[k]; }
+        else { node.setAttribute(k, attrs[k]); }
+      }
+    }
+    if (children) {
+      if (!Array.isArray(children)) children = [children];
+      for (var i = 0; i < children.length; i++) {
+        var c = children[i];
+        if (c == null) continue;
+        if (typeof c === "string") node.appendChild(document.createTextNode(c));
+        else node.appendChild(c);
+      }
+    }
+    return node;
+  }
+
+  /* =================================================================
+   *  Toast
+   * ================================================================= */
+  var toastEl = null;
+  var toastTimer = null;
+  function showToast(msg, kind) {
+    if (!toastEl) {
+      toastEl = el("div", { id: "wc-iti-toast" });
+      document.body.appendChild(toastEl);
+    }
+    var icon = kind === "info" ? "ℹ️" : "✅";
+    toastEl.innerHTML = "";
+    toastEl.appendChild(el("span",
+      { class: "wc-iti-toast-icon" }, icon));
+    toastEl.appendChild(document.createTextNode(msg));
+    toastEl.classList.add("visible");
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () {
+      toastEl.classList.remove("visible");
+    }, 1900);
+  }
+
+  /* =================================================================
+   *  ITINERARY PANEL
+   * ================================================================= */
+  var rerender = function () {};   // assigned inside initItinerary
+
+  /* Public global API — anything on the page can call this to push a
+     stop into the active plan. Caller may include lat/lon. */
+  function publicAdd(p) {
+    if (!p || !p.title) return;
+    var t = typeMeta(p.type || inferType(p.title + " " + (p.subtitle || "")));
+    var all = loadAll();
+    var scope = getScope();
+    var arr = Array.isArray(all[scope]) ? all[scope].slice() : [];
+    var lat = (typeof p.lat === "number") ? p.lat : null;
+    var lon = (typeof p.lon === "number") ? p.lon
+            : (typeof p.lng === "number") ? p.lng : null;
+    /* Fallback to KNOWN_COORDS when adding well-known chips that didn't
+       carry their own coordinates. */
+    if ((lat === null || lon === null) && KNOWN_COORDS[p.title]) {
+      lat = KNOWN_COORDS[p.title][0];
+      lon = KNOWN_COORDS[p.title][1];
+    }
+    arr.push({
+      id: uid(),
+      type: t.id,
+      title: String(p.title).slice(0, 140),
+      subtitle: String(p.subtitle || "").slice(0, 220),
+      time: String(p.time || "").slice(0, 30),
+      color: t.color,
+      lat: lat,
+      lon: lon,
+    });
+    all[scope] = arr;
+    saveAll(all);
+    rerender();
+    showToast("Added “" + p.title + "” to plan");
+    /* If panel was collapsed/closed, reveal it on add. */
+    var html = document.documentElement;
+    html.classList.remove("wc-itinerary-collapsed");
+    html.classList.add("wc-itinerary-open");
+  }
+  window.wcAddToItinerary = publicAdd;
+
+  function initItinerary() {
+    if (document.getElementById("wc-itinerary-panel")) return;
+
+    var html = document.documentElement;
+    html.classList.add("wc-itinerary-active");
+    html.classList.add("wc-itinerary-shift-content");
+
+    var panel = el("aside", {
+      id: "wc-itinerary-panel",
+      role: "complementary",
+      "aria-label": "Match-day itinerary planner",
+    });
+
+    /* ---- Header ---- */
+    panel.appendChild(
+      el("div", { class: "wc-iti-header" }, [
+        el("div", { class: "wc-iti-title-row" }, [
+          el("span", { class: "wc-iti-emoji", "aria-hidden": "true" }, "🗓️"),
+          el("div", { class: "wc-iti-title-stack" }, [
+            el("div", { class: "wc-iti-title" }, "Your Match-Day Plan"),
+            el("div", { class: "wc-iti-sub" },
+              "Drag map popups, chips, or text into the list"),
+          ]),
+          el("button", {
+            class: "wc-iti-collapse",
+            "aria-label": "Collapse panel",
+            title: "Collapse",
+            onclick: function () {
+              html.classList.add("wc-itinerary-collapsed");
+              html.classList.remove("wc-itinerary-open");
+            },
+          }, "›"),
+        ]),
+        el("div", { class: "wc-iti-scope-row" }, [
+          el("label", { class: "wc-iti-scope-label" }, "Plan"),
+          (function () {
+            var inp = el("input", {
+              class: "wc-iti-scope-input",
+              type: "text",
+              value: getScope(),
+              placeholder: "e.g. M1 · Boston Opener",
+            });
+            inp.addEventListener("change", function () {
+              setScope(inp.value.trim() || "default");
+              rerender();
+            });
+            return inp;
+          })(),
+        ]),
+      ])
+    );
+
+    /* ---- Quick add (with address autocomplete) ----
+       Autocomplete is powered by Photon (komoot's free OSM-backed
+       geocoder, CORS-enabled, no API key required). Results are biased
+       toward Boston / Foxborough so the most common matches surface
+       first. */
+    var typeSel = el("select", { class: "wc-iti-type-sel" });
+    TYPES.forEach(function (t) {
+      typeSel.appendChild(
+        el("option", { value: t.id }, t.icon + "  " + t.label)
+      );
+    });
+    var titleInp = el("input", {
+      class: "wc-iti-title-inp",
+      type: "text",
+      autocomplete: "off",
+      spellcheck: "false",
+      placeholder: "Search an address, place, or station…",
+    });
+    var addBtn = el("button", {
+      class: "wc-iti-add-btn",
+      title: "Add to plan",
+    }, "+ Add");
+    var suggestBox = el("div", {
+      class: "wc-iti-suggest",
+      role: "listbox",
+      "aria-label": "Address suggestions",
+    });
+
+    var pendingSuggest = null;
+    var suggestActive = -1;
+    var suggestData = [];
+
+    function clearSuggest() {
+      suggestBox.classList.remove("visible");
+      suggestBox.innerHTML = "";
+      suggestActive = -1;
+      suggestData = [];
+    }
+    function pickSuggest(idx) {
+      var s = suggestData[idx];
+      if (!s) return;
+      publicAdd({
+        type: typeSel.value === "note" ? s.type : typeSel.value,
+        title: s.title,
+        subtitle: s.subtitle,
+        lat: s.lat,
+        lon: s.lon,
+      });
+      titleInp.value = "";
+      clearSuggest();
+      titleInp.focus();
+    }
+    function highlightSuggest(idx) {
+      var rows = suggestBox.querySelectorAll(".wc-iti-suggest-item");
+      Array.prototype.forEach.call(rows, function (r, i) {
+        r.classList.toggle("active", i === idx);
+      });
+      suggestActive = idx;
+    }
+    function renderSuggest(list) {
+      suggestBox.innerHTML = "";
+      suggestData = list;
+      if (!list.length) {
+        suggestBox.appendChild(
+          el("div", { class: "wc-iti-suggest-empty" },
+            "No matches. Press Enter to add anyway.")
+        );
+        suggestBox.classList.add("visible");
+        return;
+      }
+      list.forEach(function (s, i) {
+        var t = typeMeta(s.type);
+        var row = el("div", {
+          class: "wc-iti-suggest-item",
+          role: "option",
+          onclick: function () { pickSuggest(i); },
+          onmouseenter: function () { highlightSuggest(i); },
+        }, [
+          el("span", { class: "wc-iti-suggest-icon" }, t.icon),
+          el("div", { class: "wc-iti-suggest-text" }, [
+            el("div", { class: "wc-iti-suggest-title" }, s.title),
+            el("div", { class: "wc-iti-suggest-sub" }, s.subtitle || ""),
+          ]),
+        ]);
+        suggestBox.appendChild(row);
+      });
+      suggestBox.appendChild(
+        el("div", { class: "wc-iti-suggest-foot" },
+          "Powered by OpenStreetMap (Photon)")
+      );
+      suggestBox.classList.add("visible");
+    }
+
+    function fetchSuggest(q) {
+      var url =
+        "https://photon.komoot.io/api/?q=" + encodeURIComponent(q) +
+        "&limit=6&lang=en&lat=42.32&lon=-71.10&location_bias_scale=0.5";
+      return fetch(url, { headers: { "Accept": "application/json" } })
+        .then(function (r) { return r.ok ? r.json() : { features: [] }; })
+        .then(function (j) {
+          return (j.features || []).map(function (f) {
+            var p = f.properties || {};
+            var c = (f.geometry && f.geometry.coordinates) || [null, null];
+            var name = p.name || p.street || "Unnamed location";
+            var sub = [
+              p.street && p.housenumber ? p.housenumber + " " + p.street
+                                        : p.street,
+              p.district || p.suburb,
+              p.city || p.town || p.village,
+              p.state, p.country,
+            ].filter(Boolean).join(", ");
+            var typeHint = inferType(
+              (name || "") + " " + (p.osm_value || "") + " " +
+              (p.osm_key || "")
+            );
+            return {
+              title: name,
+              subtitle: sub,
+              lat: c[1],
+              lon: c[0],
+              type: typeHint,
+            };
+          });
+        })
+        .catch(function () { return []; });
+    }
+
+    function scheduleSuggest() {
+      var q = titleInp.value.trim();
+      if (pendingSuggest) clearTimeout(pendingSuggest);
+      if (q.length < 2) { clearSuggest(); return; }
+      suggestBox.innerHTML = "";
+      suggestBox.appendChild(
+        el("div", { class: "wc-iti-suggest-loading" }, "Searching…")
+      );
+      suggestBox.classList.add("visible");
+      pendingSuggest = setTimeout(function () {
+        fetchSuggest(q).then(function (list) {
+          if (titleInp.value.trim() !== q) return;
+          renderSuggest(list);
+        });
+      }, 280);
+    }
+
+    function addCustom() {
+      /* If a suggestion is highlighted, prefer it (so Enter accepts). */
+      if (suggestActive >= 0 && suggestData[suggestActive]) {
+        pickSuggest(suggestActive);
+        return;
+      }
+      var v = titleInp.value.trim();
+      if (!v) return;
+      publicAdd({ type: typeSel.value, title: v, subtitle: "" });
+      titleInp.value = "";
+      clearSuggest();
+      titleInp.focus();
+    }
+    addBtn.addEventListener("click", addCustom);
+    titleInp.addEventListener("input", scheduleSuggest);
+    titleInp.addEventListener("focus", function () {
+      if (suggestData.length) suggestBox.classList.add("visible");
+    });
+    titleInp.addEventListener("keydown", function (e) {
+      if (e.key === "ArrowDown") {
+        if (suggestData.length) {
+          highlightSuggest((suggestActive + 1) % suggestData.length);
+          e.preventDefault();
+        }
+      } else if (e.key === "ArrowUp") {
+        if (suggestData.length) {
+          highlightSuggest(
+            (suggestActive - 1 + suggestData.length) % suggestData.length
+          );
+          e.preventDefault();
+        }
+      } else if (e.key === "Enter") {
+        addCustom();
+        e.preventDefault();
+      } else if (e.key === "Escape") {
+        clearSuggest();
+      }
+    });
+    /* Close suggestions when clicking outside the search wrap */
+    document.addEventListener("click", function (e) {
+      if (!suggestBox.contains(e.target) && e.target !== titleInp) {
+        clearSuggest();
+      }
+    });
+
+    /* Helper buttons — read live values from the page. */
+    var helperRow = el("div", { class: "wc-iti-helper-row" }, [
+      el("button", {
+        class: "wc-iti-helper-btn",
+        title: "Read 'Where are you starting from?' input on the page",
+        onclick: function () {
+          var v = readStartingPointFromPage();
+          if (!v) {
+            showToast("No starting location entered on the page yet", "info");
+            return;
+          }
+          publicAdd({
+            type: "start",
+            title: v,
+            subtitle: "Your starting point",
+          });
+        },
+      }, "📍 Use my starting location"),
+      el("button", {
+        class: "wc-iti-helper-btn",
+        title: "Add Gillette Stadium as the final destination",
+        onclick: function () {
+          publicAdd({
+            type: "stadium",
+            title: "Gillette Stadium",
+            subtitle: "Foxborough, MA · Match venue",
+          });
+        },
+      }, "🏟️ Add Gillette as end"),
+    ]);
+
+    panel.appendChild(
+      el("div", { class: "wc-iti-quick-add" }, [
+        el("div", { class: "wc-iti-quick-row" }, [typeSel, addBtn]),
+        el("div", { class: "wc-iti-search-wrap" }, [titleInp, suggestBox]),
+        helperRow,
+      ])
+    );
+
+    /* ---- Grouped preset chips ---- */
+    var presetWrap = el("div", { class: "wc-iti-presets" }, [
+      el("div", { class: "wc-iti-section-label" }, "Quick-add from data"),
+    ]);
+    PRESET_GROUPS.forEach(function (group) {
+      var gWrap = el("div", { class: "wc-iti-preset-group" });
+      gWrap.appendChild(
+        el("div", {
+          class: "wc-iti-group-label",
+          style: { "--group-color": group.groupColor },
+        }, group.groupLabel)
+      );
+      var row = el("div", { class: "wc-iti-preset-chips" });
+      group.items.forEach(function (p) {
+        var t = typeMeta(p.type);
+        var chip = el("button", {
+          class: "wc-iti-chip",
+          title: "Add: " + p.title +
+            (p.subtitle ? " — " + p.subtitle : ""),
+          style: { "--chip-color": t.color },
+          onclick: function () { publicAdd(p); },
+        }, [
+          el("span", { class: "wc-iti-chip-icon" }, t.icon),
+          el("span", { class: "wc-iti-chip-label" }, p.title),
+        ]);
+        row.appendChild(chip);
+      });
+      gWrap.appendChild(row);
+      presetWrap.appendChild(gWrap);
+    });
+    panel.appendChild(presetWrap);
+
+    /* ---- Plan map (numbered markers + colored connector lines) ---- */
+    var mapEl = el("div", { class: "wc-iti-map", id: "wc-iti-map" });
+    var mapEmpty = el("div", { class: "wc-iti-map-empty" },
+      "Add stops with coordinates to see them connected here.");
+    mapEl.appendChild(mapEmpty);
+
+    var mapPill = el("span", { class: "wc-iti-map-pill", id: "wc-iti-map-pill" }, "0 mapped");
+    var mapToggle = el("button", {
+      class: "wc-iti-map-toggle",
+      title: "Show/hide route map",
+    }, "Hide");
+    var mapOrphans = el("div", {
+      class: "wc-iti-map-orphans",
+      id: "wc-iti-map-orphans",
+    });
+
+    var mapSection = el("div", { class: "wc-iti-map-section" }, [
+      el("div", { class: "wc-iti-map-head" }, [
+        el("span", { class: "wc-iti-map-label" }, [
+          el("span", { "aria-hidden": "true" }, "🗺️"),
+          el("span", null, "Plan map"),
+          mapPill,
+        ]),
+        mapToggle,
+      ]),
+      mapEl,
+      mapOrphans,
+    ]);
+    panel.appendChild(mapSection);
+
+    var mapCollapsed = false;
+    mapToggle.addEventListener("click", function () {
+      mapCollapsed = !mapCollapsed;
+      mapEl.classList.toggle("collapsed", mapCollapsed);
+      mapOrphans.style.display = mapCollapsed ? "none" : "";
+      mapToggle.textContent = mapCollapsed ? "Show" : "Hide";
+      if (!mapCollapsed) {
+        /* Leaflet needs to recompute size after being hidden. */
+        whenLeaflet(function () {
+          if (planMap) setTimeout(function () { planMap.invalidateSize(); }, 30);
+        });
+      }
+    });
+
+    /* Plan map state — initialised lazily once Leaflet is loaded. */
+    var planMap = null;
+    var planLayer = null;
+    function ensurePlanMap() {
+      if (planMap || !window.L || mapCollapsed) return;
+      try {
+        planMap = window.L.map(mapEl, {
+          zoomControl: true,
+          attributionControl: true,
+          scrollWheelZoom: false,
+          dragging: true,
+          tap: false,
+        }).setView([42.3601, -71.0589], 11);
+        window.L.tileLayer(
+          "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+          {
+            attribution: "© OpenStreetMap · © CARTO",
+            subdomains: "abcd",
+            maxZoom: 19,
+          }
+        ).addTo(planMap);
+        planLayer = window.L.layerGroup().addTo(planMap);
+      } catch (_) { planMap = null; }
+    }
+
+    function renderPlanMap() {
+      var arr = items();
+      var pinned = arr.filter(function (x) {
+        return typeof x.lat === "number" && typeof x.lon === "number";
+      });
+      var orphans = arr.length - pinned.length;
+      mapPill.textContent =
+        pinned.length + " mapped" + (orphans ? " · " + orphans + " off-map" : "");
+      mapOrphans.textContent = orphans
+        ? orphans + " stop" + (orphans === 1 ? "" : "s") +
+          " not yet geocoded — search via the box above to pin a location"
+        : "";
+
+      mapEmpty.style.display = pinned.length ? "none" : "";
+      if (mapCollapsed) return;
+
+      whenLeaflet(function () {
+        ensurePlanMap();
+        if (!planMap || !planLayer) return;
+        planLayer.clearLayers();
+        if (!pinned.length) {
+          planMap.setView([42.3601, -71.0589], 11);
+          planMap.invalidateSize();
+          return;
+        }
+        var pts = [];
+        pinned.forEach(function (it, idx) {
+          var t = typeMeta(it.type);
+          var step = arr.indexOf(it) + 1;
+          var rolePos =
+            idx === 0 ? "start" : (idx === pinned.length - 1 ? "end" : "");
+          var html =
+            '<div class="wc-iti-mapnum ' + rolePos +
+            '" style="background:' + t.color + ';">' + step + "</div>";
+          var icon = window.L.divIcon({
+            className: "wc-iti-mapmarker",
+            html: html,
+            iconSize: [28, 28],
+            iconAnchor: [14, 14],
+            popupAnchor: [0, -14],
+          });
+          var m = window.L.marker([it.lat, it.lon], { icon: icon })
+            .bindTooltip(
+              "<b>" + step + ". " + (it.title || "Stop") + "</b>" +
+              (it.subtitle ? "<br>" + it.subtitle : "") +
+              (it.time ? "<br>🕒 " + it.time : ""),
+              { sticky: true }
+            )
+            .addTo(planLayer);
+          m.on("click", function () {
+            var li = list.querySelector('[data-id="' + it.id + '"]');
+            if (li) {
+              li.scrollIntoView({ behavior: "smooth", block: "center" });
+              li.style.transition = "box-shadow 0.4s ease";
+              li.style.boxShadow = "0 0 0 3px " + t.color + "55";
+              setTimeout(function () { li.style.boxShadow = ""; }, 900);
+            }
+          });
+          pts.push([it.lat, it.lon]);
+        });
+
+        /* Colored connecting lines between consecutive mapped stops.
+           Each segment uses the destination's category color so the
+           color tells the user "what comes next". */
+        for (var i = 1; i < pts.length; i++) {
+          var nextColor = typeMeta(pinned[i].type).color;
+          window.L.polyline([pts[i - 1], pts[i]], {
+            color: nextColor,
+            weight: 4.5,
+            opacity: 0.85,
+            lineCap: "round",
+            lineJoin: "round",
+          }).addTo(planLayer);
+          /* Subtle white halo underneath so colored lines stay legible
+             over busy basemaps. */
+          window.L.polyline([pts[i - 1], pts[i]], {
+            color: "#ffffff",
+            weight: 7,
+            opacity: 0.55,
+            lineCap: "round",
+            lineJoin: "round",
+          }).addTo(planLayer).bringToBack();
+        }
+
+        if (pts.length > 1) {
+          planMap.fitBounds(pts, { padding: [22, 22], maxZoom: 14 });
+        } else {
+          planMap.setView(pts[0], 13);
+        }
+        planMap.invalidateSize();
+      });
+    }
+
+    /* ---- List ---- */
+    var listWrap = el("div", {
+      class: "wc-iti-list-wrap",
+      id: "wc-iti-list-wrap",
+    }, [
+      el("div", { class: "wc-iti-section-label wc-iti-list-label" }, [
+        el("span", null, "Plan order"),
+        (function () {
+          var c = el("span", { class: "wc-iti-count" }, "0 stops");
+          c.id = "wc-iti-count";
+          return c;
+        })(),
+      ]),
+    ]);
+    var list = el("ol", { class: "wc-iti-list", id: "wc-iti-list" });
+    listWrap.appendChild(list);
+    var emptyHint = el("div", {
+      class: "wc-iti-empty",
+      id: "wc-iti-empty",
+      html: "No stops yet. <b>Click any chip</b> above, " +
+        "<b>type a custom stop</b>, or <b>drag selected text</b> from " +
+        "the page (e.g. a restaurant name) into this area.",
+    });
+    listWrap.appendChild(emptyHint);
+    panel.appendChild(listWrap);
+
+    /* ---- Footer ---- */
+    panel.appendChild(
+      el("div", { class: "wc-iti-footer" }, [
+        el("button", {
+          class: "wc-iti-foot-btn",
+          onclick: function () { exportPlan(); },
+          title: "Copy your plan as text",
+        }, "Copy"),
+        el("button", {
+          class: "wc-iti-foot-btn",
+          onclick: function () { window.print(); },
+          title: "Print this plan",
+        }, "Print"),
+        el("button", {
+          class: "wc-iti-foot-btn wc-iti-clear",
+          onclick: function () {
+            if (confirm("Clear all stops in this plan?")) {
+              var all = loadAll();
+              all[getScope()] = [];
+              saveAll(all);
+              rerender();
+            }
+          },
+          title: "Remove every stop",
+        }, "Clear"),
+      ])
+    );
+
+    /* ---- Floating "open" pill ---- */
+    var openPill = el("button", {
+      id: "wc-iti-open",
+      "aria-label": "Open itinerary panel",
+      title: "Open itinerary",
+      onclick: function () {
+        html.classList.remove("wc-itinerary-collapsed");
+        html.classList.add("wc-itinerary-open");
+      },
+    }, "🗓️ Plan");
+
+    /* ---- Resize handle (drag the panel wider/narrower) ----
+       Width is persisted in localStorage and applied as the
+       --wc-iti-width custom property, so body padding-right and
+       chrome offsets follow automatically. */
+    var WIDTH_KEY = "wc26-itinerary-width";
+    var WIDTH_MIN = 280;
+    var WIDTH_MAX_FACTOR = 0.65; /* never wider than 65% of viewport */
+
+    function applyWidth(px) {
+      var maxPx = Math.max(WIDTH_MIN, window.innerWidth * WIDTH_MAX_FACTOR);
+      var clamped = Math.max(WIDTH_MIN, Math.min(maxPx, px));
+      document.documentElement.style.setProperty(
+        "--wc-iti-width", clamped + "px"
+      );
+      return clamped;
+    }
+    /* Restore the user's previous width on boot. */
+    try {
+      var savedW = parseFloat(localStorage.getItem(WIDTH_KEY));
+      if (savedW && isFinite(savedW)) applyWidth(savedW);
+    } catch (_) {}
+
+    var resizeHandle = el("div", {
+      class: "wc-iti-resize",
+      role: "separator",
+      "aria-label": "Resize itinerary panel",
+      "aria-orientation": "vertical",
+      tabindex: "0",
+    });
+    var resizeTip = el("div", { class: "wc-iti-resize-tip" }, "Drag");
+    resizeHandle.appendChild(resizeTip);
+    panel.appendChild(resizeHandle);
+
+    var dragStartX = 0;
+    var dragStartW = 0;
+    function onResizeMove(e) {
+      var dx = dragStartX - e.clientX; /* drag LEFT widens the panel */
+      var w = applyWidth(dragStartW + dx);
+      resizeTip.textContent = Math.round(w) + " px";
+      /* Keep the in-panel Leaflet map laid out correctly during drag. */
+      try {
+        if (planMap) planMap.invalidateSize({ animate: false });
+      } catch (_) {}
+    }
+    function onResizeUp() {
+      document.documentElement.classList.remove("wc-itinerary-resizing");
+      document.removeEventListener("mousemove", onResizeMove);
+      document.removeEventListener("mouseup", onResizeUp);
+      document.removeEventListener("touchmove", onResizeTouchMove);
+      document.removeEventListener("touchend", onResizeUp);
+      var current = parseFloat(
+        getComputedStyle(panel).width
+      );
+      try { localStorage.setItem(WIDTH_KEY, String(Math.round(current))); }
+      catch (_) {}
+      try {
+        if (planMap) planMap.invalidateSize({ animate: false });
+      } catch (_) {}
+    }
+    function onResizeTouchMove(e) {
+      if (!e.touches || !e.touches[0]) return;
+      onResizeMove({ clientX: e.touches[0].clientX });
+      e.preventDefault();
+    }
+    resizeHandle.addEventListener("mousedown", function (e) {
+      if (e.button !== 0) return;
+      dragStartX = e.clientX;
+      dragStartW = parseFloat(getComputedStyle(panel).width);
+      document.documentElement.classList.add("wc-itinerary-resizing");
+      document.addEventListener("mousemove", onResizeMove);
+      document.addEventListener("mouseup", onResizeUp);
+      e.preventDefault();
+    });
+    resizeHandle.addEventListener("touchstart", function (e) {
+      if (!e.touches || !e.touches[0]) return;
+      dragStartX = e.touches[0].clientX;
+      dragStartW = parseFloat(getComputedStyle(panel).width);
+      document.documentElement.classList.add("wc-itinerary-resizing");
+      document.addEventListener("touchmove", onResizeTouchMove,
+                                { passive: false });
+      document.addEventListener("touchend", onResizeUp);
+    }, { passive: true });
+    /* Double-click resets width to the default. */
+    resizeHandle.addEventListener("dblclick", function () {
+      document.documentElement.style.removeProperty("--wc-iti-width");
+      try { localStorage.removeItem(WIDTH_KEY); } catch (_) {}
+      try {
+        if (planMap) planMap.invalidateSize({ animate: false });
+      } catch (_) {}
+    });
+    /* Keyboard resize for accessibility (← / → with handle focused). */
+    resizeHandle.addEventListener("keydown", function (e) {
+      var step = e.shiftKey ? 32 : 12;
+      var current = parseFloat(getComputedStyle(panel).width);
+      if (e.key === "ArrowLeft") {
+        var w1 = applyWidth(current + step);
+        try { localStorage.setItem(WIDTH_KEY, String(Math.round(w1))); }
+        catch (_) {}
+        e.preventDefault();
+      } else if (e.key === "ArrowRight") {
+        var w2 = applyWidth(current - step);
+        try { localStorage.setItem(WIDTH_KEY, String(Math.round(w2))); }
+        catch (_) {}
+        e.preventDefault();
+      }
+    });
+    /* Re-clamp if the viewport shrinks below the saved width. */
+    window.addEventListener("resize", function () {
+      var current = parseFloat(getComputedStyle(panel).width);
+      applyWidth(current);
+      try {
+        if (planMap) planMap.invalidateSize({ animate: false });
+      } catch (_) {}
+    });
+
+    document.body.appendChild(panel);
+    document.body.appendChild(openPill);
+
+    /* ---- State helpers (in-scope) ---- */
+    function items() {
+      var all = loadAll();
+      return Array.isArray(all[getScope()]) ? all[getScope()] : [];
+    }
+    function setItems(next) {
+      var all = loadAll();
+      all[getScope()] = next;
+      saveAll(all);
+      render();
+    }
+    function removeItem(id) {
+      setItems(items().filter(function (x) { return x.id !== id; }));
+    }
+    function updateItem(id, patch) {
+      setItems(items().map(function (x) {
+        return x.id === id ? Object.assign({}, x, patch) : x;
+      }));
+    }
+    function exportPlan() {
+      var lines = items().map(function (x, i) {
+        var t = typeMeta(x.type);
+        var time = x.time ? " — " + x.time : "";
+        var sub = x.subtitle ? " (" + x.subtitle + ")" : "";
+        return (i + 1) + ". " + t.icon + " [" + t.label + "] " +
+          x.title + sub + time;
+      });
+      var text = "WC 2026 Match-Day Plan: " + getScope() + "\n" +
+        "===============================\n" +
+        (lines.length ? lines.join("\n") : "(no stops)");
+      try {
+        if (navigator.clipboard) navigator.clipboard.writeText(text);
+        else throw new Error("no clipboard");
+        showToast("Copied plan to clipboard");
+      } catch (_) {
+        prompt("Copy your plan:", text);
+      }
+    }
+
+    /* ---- Drag and drop reordering ---- */
+    var dragId = null;
+    function onDragStart(e) {
+      dragId = e.currentTarget.dataset.id;
+      e.currentTarget.classList.add("dragging");
+      try {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/x-wc-iti-id", dragId);
+        e.dataTransfer.setData("text/plain", dragId);
+      } catch (_) {}
+    }
+    function onDragEnd(e) {
+      e.currentTarget.classList.remove("dragging");
+      Array.prototype.forEach.call(
+        list.querySelectorAll(".wc-iti-item"),
+        function (n) { n.classList.remove("drop-above", "drop-below"); }
+      );
+      dragId = null;
+    }
+    function onDragOver(e) {
+      if (!dragId) return;
+      e.preventDefault();
+      var target = e.currentTarget;
+      if (target.dataset.id === dragId) return;
+      var rect = target.getBoundingClientRect();
+      var midpoint = rect.top + rect.height / 2;
+      Array.prototype.forEach.call(
+        list.querySelectorAll(".wc-iti-item"),
+        function (n) { n.classList.remove("drop-above", "drop-below"); }
+      );
+      target.classList.add(e.clientY < midpoint ? "drop-above" : "drop-below");
+    }
+    function onDrop(e) {
+      if (!dragId) return;
+      e.preventDefault();
+      var target = e.currentTarget;
+      var targetId = target.dataset.id;
+      if (targetId === dragId) return;
+      var rect = target.getBoundingClientRect();
+      var before = e.clientY < rect.top + rect.height / 2;
+      var arr = items().slice();
+      var fromIdx = arr.findIndex(function (x) { return x.id === dragId; });
+      if (fromIdx < 0) return;
+      var moved = arr.splice(fromIdx, 1)[0];
+      var toIdx = arr.findIndex(function (x) { return x.id === targetId; });
+      if (toIdx < 0) toIdx = arr.length;
+      arr.splice(before ? toIdx : toIdx + 1, 0, moved);
+      setItems(arr);
+    }
+
+    /* ---- List = drop target for outside text drags ---- */
+    listWrap.addEventListener("dragover", function (e) {
+      var hasInternal = (e.dataTransfer && Array.prototype.indexOf.call(
+        e.dataTransfer.types || [], "text/x-wc-iti-id") >= 0);
+      if (hasInternal) return;          // internal reorder handled by items
+      var hasText = (e.dataTransfer && Array.prototype.indexOf.call(
+        e.dataTransfer.types || [], "text/plain") >= 0);
+      if (!hasText) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      listWrap.classList.add("drop-target-active");
+    });
+    listWrap.addEventListener("dragleave", function () {
+      listWrap.classList.remove("drop-target-active");
+    });
+    listWrap.addEventListener("drop", function (e) {
+      var hasInternal = (e.dataTransfer && Array.prototype.indexOf.call(
+        e.dataTransfer.types || [], "text/x-wc-iti-id") >= 0);
+      if (hasInternal) return;
+      e.preventDefault();
+      listWrap.classList.remove("drop-target-active");
+      var raw = (e.dataTransfer.getData("text/plain") || "").trim();
+      if (!raw) return;
+      var firstLine = raw.split(/[\r\n]+/)[0].trim().slice(0, 140);
+      var rest = raw.slice(firstLine.length).trim().slice(0, 220);
+      publicAdd({
+        type: inferType(raw),
+        title: firstLine,
+        subtitle: rest,
+      });
+    });
+
+    /* ---- Render ---- */
+    function render() {
+      var arr = items();
+      list.innerHTML = "";
+      var countEl = document.getElementById("wc-iti-count");
+      if (countEl) {
+        countEl.textContent =
+          arr.length + " stop" + (arr.length === 1 ? "" : "s");
+      }
+      emptyHint.style.display = arr.length ? "none" : "block";
+
+      arr.forEach(function (it, idx) {
+        var t = typeMeta(it.type);
+        var li = el("li", {
+          class: "wc-iti-item",
+          "data-id": it.id,
+          draggable: true,
+          style: { "--item-color": t.color },
+        });
+        li.addEventListener("dragstart", onDragStart);
+        li.addEventListener("dragend", onDragEnd);
+        li.addEventListener("dragover", onDragOver);
+        li.addEventListener("drop", onDrop);
+
+        var grip = el("span", {
+          class: "wc-iti-grip",
+          title: "Drag to reorder",
+          "aria-hidden": "true",
+        }, "⋮⋮");
+        var step = el("span", { class: "wc-iti-step" }, String(idx + 1));
+
+        var titleInpItem = el("input", {
+          class: "wc-iti-item-title",
+          type: "text",
+          value: it.title,
+        });
+        titleInpItem.addEventListener("change", function () {
+          updateItem(it.id, { title: titleInpItem.value });
+        });
+
+        var subInpItem = el("input", {
+          class: "wc-iti-item-sub",
+          type: "text",
+          value: it.subtitle,
+          placeholder: "Add a note (optional)",
+        });
+        subInpItem.addEventListener("change", function () {
+          updateItem(it.id, { subtitle: subInpItem.value });
+        });
+
+        var timeInp = el("input", {
+          class: "wc-iti-item-time",
+          type: "text",
+          value: it.time,
+          placeholder: "🕒 Time (optional)",
+          title: "Time (optional)",
+        });
+        timeInp.addEventListener("change", function () {
+          updateItem(it.id, { time: timeInp.value });
+        });
+
+        var del = el("button", {
+          class: "wc-iti-del",
+          "aria-label": "Remove this stop",
+          title: "Remove",
+          onclick: function () { removeItem(it.id); },
+        }, "✕");
+
+        var head = el("div", { class: "wc-iti-item-head" }, [
+          el("span", { class: "wc-iti-icon", title: t.label }, t.icon),
+          titleInpItem,
+        ]);
+
+        li.appendChild(grip);
+        li.appendChild(step);
+        li.appendChild(
+          el("div", { class: "wc-iti-item-body" }, [head, subInpItem, timeInp])
+        );
+        li.appendChild(del);
+        list.appendChild(li);
+      });
+      /* Mirror the order/coords onto the route map. */
+      renderPlanMap();
+    }
+    rerender = render;
+    render();
+
+    /* Cross-tab/window sync */
+    window.addEventListener("storage", function (e) {
+      if (e.key === STORAGE_KEY || e.key === SCOPE_KEY) render();
+    });
+  }
+
+  /* =================================================================
+   *  Reading the page's starting-location input
+   *  Marimo renders mo.ui.text with our placeholder, so we match by
+   *  placeholder substring to avoid relying on auto-generated IDs.
+   * ================================================================= */
+  function readStartingPointFromPage() {
+    var inputs = document.querySelectorAll("input[type=text], input:not([type])");
+    for (var i = 0; i < inputs.length; i++) {
+      var ph = (inputs[i].placeholder || "").toLowerCase();
+      if (ph.indexOf("park plaza") >= 0 ||
+          ph.indexOf("hotel") >= 0 ||
+          ph.indexOf("starting") >= 0) {
+        var v = (inputs[i].value || "").trim();
+        if (v) return v;
+      }
+    }
+    return null;
+  }
+
+  /* =================================================================
+   *  Leaflet popup integration
+   *
+   *  Folium maps embed Leaflet inside (same-origin) iframes that
+   *  marimo creates. We watch:
+   *    1. The main document for any new .leaflet-popup-content
+   *    2. Every same-origin iframe (and any future ones)
+   *  When a popup appears we inject a "+ Add to plan" button at the
+   *  bottom that, when clicked, sends a structured item to the parent.
+   * ================================================================= */
+  function popupTitleAndSub(popupEl) {
+    /* Strategy: first non-empty <b>/<strong> text → title.
+       Remaining text (first ~3 short lines) → subtitle. */
+    var title = "", sub = "";
+    var bold = popupEl.querySelector("b, strong, h1, h2, h3, h4");
+    if (bold && bold.textContent.trim()) title = bold.textContent.trim();
+    var raw = popupEl.textContent.replace(/\s+/g, " ").trim();
+    if (!title) {
+      var first = raw.split(".")[0] || raw;
+      title = first.slice(0, 80).trim();
+    }
+    sub = raw.replace(title, "").replace(/^[\s·•|—–-]+/, "")
+             .slice(0, 180).trim();
+    return { title: title || "Map location", subtitle: sub };
+  }
+
+  function injectAddBtn(popupEl, ownerWindow, latLng) {
+    if (!popupEl || popupEl.querySelector(".wc-iti-popup-add")) return;
+    var meta = popupTitleAndSub(popupEl);
+    var btn = (ownerWindow.document || document).createElement("button");
+    btn.className = "wc-iti-popup-add";
+    btn.type = "button";
+    btn.innerHTML = "<span style=\"font-size:1rem;line-height:1\">＋</span>" +
+                    " Add to plan";
+    btn.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      var inferred = inferType(meta.title + " " + meta.subtitle);
+      var payload = {
+        type: inferred,
+        title: meta.title,
+        subtitle: meta.subtitle,
+      };
+      if (latLng) {
+        payload.lat = latLng.lat;
+        payload.lon = latLng.lng;
+      }
+      try { window.wcAddToItinerary(payload); } catch (_) {}
+      btn.classList.add("added");
+      btn.innerHTML = "✓ Added";
+      setTimeout(function () {
+        btn.classList.remove("added");
+        btn.innerHTML = "<span style=\"font-size:1rem;line-height:1\">＋</span>" +
+                        " Add to plan";
+      }, 1500);
+    });
+
+    /* Inject the popup CSS into the iframe document if needed. */
+    if (ownerWindow !== window) {
+      try {
+        var doc = ownerWindow.document;
+        if (!doc.getElementById("wc-iti-popup-style")) {
+          var style = doc.createElement("style");
+          style.id = "wc-iti-popup-style";
+          style.textContent =
+            ".wc-iti-popup-add{display:inline-flex;align-items:center;gap:5px;" +
+            "margin-top:6px;background:linear-gradient(135deg,#0033a0 0%,#00b5e2 100%);" +
+            "color:#fff!important;border:none;font-family:system-ui,sans-serif;" +
+            "font-weight:700;font-size:.78rem;padding:5px 11px;border-radius:999px;" +
+            "cursor:pointer;text-decoration:none!important;" +
+            "box-shadow:0 3px 8px rgba(0,51,160,.25);}" +
+            ".wc-iti-popup-add.added{background:#16a34a;}" +
+            ".wc-iti-popup-add:hover{transform:translateY(-1px);}";
+          doc.head.appendChild(style);
+        }
+      } catch (_) {}
+    }
+    popupEl.appendChild(document.createElement("br"));
+    popupEl.appendChild(btn);
+  }
+
+  function watchDocForPopups(doc, ownerWindow) {
+    /* Catch popups already present. */
+    Array.prototype.forEach.call(
+      doc.querySelectorAll(".leaflet-popup-content"),
+      function (p) { injectAddBtn(p, ownerWindow); }
+    );
+    if (doc.__wcPopupObserver) return;
+    var mo = new (ownerWindow.MutationObserver || MutationObserver)(function (mut) {
+      mut.forEach(function (m) {
+        Array.prototype.forEach.call(m.addedNodes || [], function (n) {
+          if (!n || n.nodeType !== 1) return;
+          if (n.classList && n.classList.contains("leaflet-popup-content")) {
+            injectAddBtn(n, ownerWindow);
+          } else if (n.querySelectorAll) {
+            Array.prototype.forEach.call(
+              n.querySelectorAll(".leaflet-popup-content"),
+              function (p) { injectAddBtn(p, ownerWindow); }
+            );
+          }
+        });
+      });
+    });
+    mo.observe(doc.body || doc.documentElement, { childList: true, subtree: true });
+    doc.__wcPopupObserver = mo;
+  }
+
+  /* Find every Leaflet map instance inside a window. Folium typically
+     assigns its map to a global var, so it ends up as a property of
+     the iframe's contentWindow. */
+  function findLeafletMaps(win) {
+    if (!win || !win.L || !win.L.Map) return [];
+    var found = [];
+    for (var k in win) {
+      try {
+        var v = win[k];
+        if (v && v instanceof win.L.Map && found.indexOf(v) < 0) found.push(v);
+      } catch (_) {}
+    }
+    return found;
+  }
+
+  function attachLeafletMap(map, ownerWindow) {
+    if (!map || map.__wcAttached) return;
+    map.__wcAttached = true;
+    map.on("popupopen", function (e) {
+      try {
+        var popup = e.popup;
+        var ll = popup && popup.getLatLng ? popup.getLatLng() : null;
+        var content = popup && popup._container
+          ? popup._container.querySelector(".leaflet-popup-content")
+          : null;
+        if (content) injectAddBtn(content, ownerWindow, ll);
+      } catch (_) {}
+    });
+    /* Catch any popup already open right now. */
+    try {
+      var doc = ownerWindow.document;
+      Array.prototype.forEach.call(
+        doc.querySelectorAll(".leaflet-popup-content"),
+        function (p) { injectAddBtn(p, ownerWindow, null); }
+      );
+    } catch (_) {}
+  }
+
+  function attachIframe(iframe) {
+    if (!iframe || iframe.__wcAttached) return;
+    function tryAttach() {
+      try {
+        var doc = iframe.contentDocument;
+        if (!doc) return false;
+        if (!doc.body) return false;
+        var win = iframe.contentWindow || window;
+        /* Prefer Leaflet's own popupopen event (gives us coords); fall
+           back to a DOM mutation observer if no map is detectable. */
+        var maps = findLeafletMaps(win);
+        if (maps.length) {
+          maps.forEach(function (m) { attachLeafletMap(m, win); });
+        } else {
+          watchDocForPopups(doc, win);
+        }
+        iframe.__wcAttached = true;
+        return true;
+      } catch (_) { return false; }   /* cross-origin iframe */
+    }
+    if (!tryAttach()) {
+      iframe.addEventListener("load", tryAttach, { once: false });
+      /* Folium's globals are created by an inline script; sometimes
+         they aren't present yet immediately on load. Retry briefly. */
+      var tries = 0;
+      var iv = setInterval(function () {
+        if (iframe.__wcAttached || tries++ > 8) { clearInterval(iv); return; }
+        tryAttach();
+      }, 350);
+    }
+  }
+
+  function startIframeWatcher() {
+    /* Initial sweep + periodic recheck (folium iframes are sometimes
+       added/removed by marimo on cell rerender). */
+    function sweep() {
+      var frames = document.querySelectorAll("iframe");
+      Array.prototype.forEach.call(frames, attachIframe);
+    }
+    sweep();
+    setInterval(sweep, 1500);
+    /* Also observe DOM additions for new iframes immediately. */
+    new MutationObserver(function (mut) {
+      mut.forEach(function (m) {
+        Array.prototype.forEach.call(m.addedNodes || [], function (n) {
+          if (!n || n.nodeType !== 1) return;
+          if (n.tagName === "IFRAME") attachIframe(n);
+          else if (n.querySelectorAll) {
+            Array.prototype.forEach.call(
+              n.querySelectorAll("iframe"), attachIframe
+            );
+          }
+        });
+      });
+    }).observe(document.body, { childList: true, subtree: true });
+  }
+
+  /* =================================================================
+   *  Boot
+   * ================================================================= */
+  function boot() {
+    var reduced = false;
+    try { reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches; }
+    catch (_) {}
+    if (!reduced) { try { initCursor(); } catch (_) {} }
+    try { loadLeaflet(); } catch (_) {}
+    try { initItinerary(); } catch (_) {}
+    try { watchDocForPopups(document, window); } catch (_) {}
+    try { startIframeWatcher(); } catch (_) {}
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
+  }
+})();
+</script>
