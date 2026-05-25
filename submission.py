@@ -1203,7 +1203,59 @@ def _(mo, requests, selected_match, starting_point, unit_toggle):
     </div>
     """
 
-    mo.md(_itinerary_html)
+    # Seed the right-rail itinerary panel with the 4-stop personalized
+    # plan (start → closest CR → Foxboro Station → Gillette). The
+    # marker is read by initPlanSeeder() in wc-head.html, which calls
+    # wcSeedPlanIfEmpty so the user's manual edits are never clobbered.
+    import json as _seed_json
+    import html as _seed_html
+    _seed_stops = [
+        {
+            "type": "start",
+            "title": _short or starting_point.get("raw_input") or "Starting point",
+            "subtitle": _display or "",
+            "lat": starting_point["lat"],
+            "lon": starting_point["lon"],
+            "time": _fmt_t(_leave_walking_dt),
+        },
+        {
+            "type": "transport",
+            "title": _closest["display_name"],
+            "subtitle": _closest.get("display_address", ""),
+            "lat": _closest["lat"],
+            "lon": _closest["lon"],
+            "time": _fmt_t(_train_departs_dt),
+        },
+        {
+            "type": "transport",
+            "title": "Foxboro Station",
+            "subtitle": "1 Patriot Place, Foxborough, MA · MBTA Foxboro Line",
+            "lat": _GILLETTE_LL[0],
+            "lon": _GILLETTE_LL[1],
+            "time": _fmt_t(_arrive_foxboro_dt),
+        },
+        {
+            "type": "stadium",
+            "title": "Gillette Stadium",
+            "subtitle": "Foxborough, MA · Match venue",
+            "lat": 42.0908,
+            "lon": -71.2643,
+            "time": _fmt_t(_kickoff_dt),
+        },
+    ]
+    _seed_scope = (
+        f"M{selected_match['match_no']} · "
+        f"{selected_match['weekday'][:3]} {selected_match['date']}"
+    )
+    _seed_marker = (
+        f'<div class="wc-plan-seed" hidden '
+        f'data-scope="{_seed_html.escape(_seed_scope, quote=True)}" '
+        f'data-tier="personalized" '
+        f'data-stops="{_seed_html.escape(_seed_json.dumps(_seed_stops), quote=True)}">'
+        f'</div>'
+    )
+
+    mo.md(_itinerary_html + _seed_marker)
     return
 
 
@@ -1596,7 +1648,51 @@ def _(mo, requests, selected_match, wc_spinner):
     </div>
     """
 
-    mo.md(_summary_html)
+    # Default 3-stop seed for the right-rail plan, used when the user
+    # didn't enter a starting location (in that case the personalized
+    # itinerary cell stops and emits nothing). When both render, the
+    # observer's tier priority lets the personalized 4-stop seed win.
+    import json as _seed_json
+    import html as _seed_html
+    _default_seed_stops = [
+        {
+            "type": "start",
+            "title": "South Station",
+            "subtitle": "700 Atlantic Ave, Boston, MA · Foxboro Line origin",
+            "lat": 42.3522,
+            "lon": -71.0552,
+            "time": _fmt_t(_arrive_south),
+        },
+        {
+            "type": "transport",
+            "title": "Foxboro Station",
+            "subtitle": "1 Patriot Place, Foxborough, MA · MBTA Foxboro Line",
+            "lat": 42.0664,
+            "lon": -71.2540,
+            "time": _fmt_t(_leave_train),
+        },
+        {
+            "type": "stadium",
+            "title": "Gillette Stadium",
+            "subtitle": "Foxborough, MA · Match venue",
+            "lat": 42.0908,
+            "lon": -71.2643,
+            "time": selected_match["kickoff_pretty"],
+        },
+    ]
+    _default_seed_scope = (
+        f"M{selected_match['match_no']} · "
+        f"{selected_match['weekday'][:3]} {selected_match['date']}"
+    )
+    _default_seed_marker = (
+        f'<div class="wc-plan-seed" hidden '
+        f'data-scope="{_seed_html.escape(_default_seed_scope, quote=True)}" '
+        f'data-tier="default" '
+        f'data-stops="{_seed_html.escape(_seed_json.dumps(_default_seed_stops), quote=True)}">'
+        f'</div>'
+    )
+
+    mo.md(_summary_html + _default_seed_marker)
     return (weather,)
 
 
