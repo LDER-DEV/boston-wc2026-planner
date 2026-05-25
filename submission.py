@@ -22,7 +22,7 @@ import marimo
 __generated_with = "0.23.6"
 app = marimo.App(
     width="medium",
-    app_title="WC 2026 Boston Crash Safety Guide",
+    app_title="WC 2026 Boston Guide",
     css_file="wc-theme.css",
     html_head_file="wc-head.html",
 )
